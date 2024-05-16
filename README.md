@@ -16,5 +16,5 @@ To view images run:
 
 Install requirements using conda/mamba
 
-```mamba install numpy opencv pbr```
+```mamba install numpy opencv pdr```
 
