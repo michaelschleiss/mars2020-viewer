@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Download Mars EDL descent imagery from PDS archives.
+"""Download Mars EDL data: descent imagery, orbital maps, and SPICE kernels.
 
 Usage:
-    python download.py              # Download all cameras
-    python download.py lcam         # Mars 2020 LCAM (87 images, ~91 MB)
-    python download.py mardi        # MSL MARDI (1504 images, ~165 MB)
+    python download.py              # List all datasets
+    python download.py lcam         # Mars 2020 LCAM (87 images)
+    python download.py ctx          # CTX orbital maps (44 MB)
+    python download.py m2020_spice  # Mars 2020 SPICE kernels
+    python download.py all          # Download everything
     python download.py --dry-run    # Show sizes without downloading
 """
 
@@ -59,25 +61,50 @@ class ByteProgress:
                 )
 
 
-# Dataset configurations
+# =============================================================================
+# BASE URLs for data archives
+# =============================================================================
 #
-# Inventory format: P,urn:nasa:pds:bundle:collection:product_id::version
-# Product ID → filename: uppercase + "01.IMG" (inventory omits the "01" version suffix)
-#
-# LCAM products:
-#   elm_0000_{sclk}_{seq}fdr_n{frame:07d}lvs_04000_0000luj
-#   All 87 frames are lossless grayscale 1024x1024
-#
-# RDCAM products (4 variants per frame):
-#   edf_0000_{sclk}_{seq}fdr_n{frame}edlc{seq}_0000luj  # full-frame lossless (want this)
-#   edf_0000_{sclk}_{seq}fdr_t{frame}edlc{seq}_0000luj  # thumbnail lossless
-#   edf_0000_{sclk}_{seq}fdr_n{frame}edlc{seq}_0000fhj  # full-frame compressed
-#   edf_0000_{sclk}_{seq}fdr_t{frame}edlc{seq}_0000fhj  # thumbnail compressed
-#   Filter: "_n" (full-frame) + "luj" (lossless) → 7141 of 19712 products
+# PDS (Planetary Data System) - NASA's official archive
+# USGS (US Geological Survey) - Processed mosaics and DEMs
+# NAIF (Navigation and Ancillary Information Facility) - SPICE kernels
 #
 _M2020_BASE = "https://planetarydata.jpl.nasa.gov/img/data/mars2020/mars2020_edlcam_ops_calibrated"
 _MSL_BASE = "https://planetarydata.jpl.nasa.gov/img/data/msl"
+_USGS_M2020 = "https://planetarymaps.usgs.gov/mosaic/mars2020_trn"
+_USGS_MSL = "https://planetarymaps.usgs.gov/mosaic/Mars/MSL"
+_NAIF_M2020 = "https://naif.jpl.nasa.gov/pub/naif/pds/pds4/mars2020/mars2020_spice/spice_kernels"
+_NAIF_MSL = "https://naif.jpl.nasa.gov/pub/naif/MSL/kernels"
+_NAIF_GENERIC = "https://naif.jpl.nasa.gov/pub/naif/generic_kernels"
+
+# Filter for Mars 2020 lossless full-frame products (vs thumbnails and compressed)
 _LOSSLESS_FULL = lambda pid: "_n" in pid and "luj" in pid
+
+# =============================================================================
+# DATASET CONFIGURATIONS
+# =============================================================================
+#
+# Each dataset uses one of four download patterns:
+#
+# 1. "inventory" + "base" + "suffix"
+#    Mars 2020 PDS4 style: fetch CSV inventory, construct URLs from product IDs
+#    Example: LCAM, RDCAM, etc.
+#
+# 2. "directory" + "pattern"
+#    MSL PDS3 style: scrape HTML directory listing, match regex pattern
+#    Example: MARDI lossy
+#
+# 3. "directories" + "pattern"
+#    Like #2 but across multiple PDS volumes (deduplicates)
+#    Example: MARDI lossless (spread across volumes 1-3)
+#
+# 4. "files"
+#    Static file list: direct URL to filename mapping
+#    Example: Orbital maps, SPICE kernels
+#
+# Optional keys:
+#   "meta_kernel" - Generate SPICE .tm file after download
+#   "filter" - Function to filter product IDs (for inventory-based)
 
 DATASETS = {
     # === MSL Curiosity ===
@@ -154,7 +181,114 @@ DATASETS = {
         "suffix": "01.IMG",
         "filter": _LOSSLESS_FULL,
     },
+    # === MSL Curiosity - Orbital Maps ===
+    "msl_orbital": {
+        "name": "MSL Gale Crater ortho + DEM",
+        "files": [
+            (
+                "https://asc-pds-services.s3.us-west-2.amazonaws.com/mosaic/MSL_Gale_Orthophoto_Mosaic_25cm_v3.tif",
+                "MSL_Gale_Orthophoto_Mosaic_25cm_v3.tif",
+            ),
+            (
+                f"{_USGS_MSL}/MSL_Gale_DEM_Mosaic_1m_v3.tif",
+                "MSL_Gale_DEM_Mosaic_1m_v3.tif",
+            ),
+        ],
+        "output": "data/msl/orbital",
+    },
+    # === MSL Curiosity - SPICE Kernels ===
+    "msl_spice": {
+        "name": "MSL EDL SPICE kernels",
+        "files": [
+            (f"{_NAIF_MSL}/spk/msl_edl_v01.bsp", "spk/msl_edl_v01.bsp"),
+            (f"{_NAIF_MSL}/spk/msl_struct_v02.bsp", "spk/msl_struct_v02.bsp"),
+            (f"{_NAIF_MSL}/ck/msl_edl_v01.bc", "ck/msl_edl_v01.bc"),
+            (f"{_NAIF_MSL}/fk/msl.tf", "fk/msl.tf"),
+            (f"{_NAIF_MSL}/ik/msl_mardi_20120731_c02.ti", "ik/msl_mardi.ti"),
+            (f"{_NAIF_MSL}/sclk/msl.tsc", "sclk/msl.tsc"),
+            (f"{_NAIF_MSL}/lsk/naif0012.tls", "lsk/naif0012.tls"),
+            (f"{_NAIF_GENERIC}/pck/pck00010.tpc", "pck/pck00010.tpc"),
+        ],
+        "output": "data/msl/spice",
+        "meta_kernel": "msl_edl.tm",
+    },
+    # === Mars 2020 - Orbital Maps ===
+    "ctx": {
+        "name": "CTX Jezero ortho + DTM (TRN reference)",
+        "files": [
+            (
+                f"{_USGS_M2020}/CTX/JEZ_ctx_B_soc_008_orthoMosaic_6m_Eqc_latTs0_lon0.tif",
+                "JEZ_ctx_ortho_6m.tif",
+            ),
+            (
+                f"{_USGS_M2020}/CTX/JEZ_ctx_B_soc_008_DTM_MOLAtopography_DeltaGeoid_20m_Eqc_latTs0_lon0.tif",
+                "JEZ_ctx_dtm_20m.tif",
+            ),
+        ],
+        "output": "data/m2020/orbital/ctx",
+    },
+    "hirise": {
+        "name": "HiRISE Jezero ortho + DTM (hazard map)",
+        "files": [
+            (
+                f"{_USGS_M2020}/HiRISE/JEZ_hirise_soc_006_orthoMosaic_25cm_Eqc_latTs0_lon0_first.tif",
+                "JEZ_hirise_ortho_25cm.tif",
+            ),
+            (
+                f"{_USGS_M2020}/HiRISE/JEZ_hirise_soc_006_DTM_MOLAtopography_DeltaGeoid_1m_Eqc_latTs0_lon0_blend40.tif",
+                "JEZ_hirise_dtm_1m.tif",
+            ),
+        ],
+        "output": "data/m2020/orbital/hirise",
+    },
+    # === Mars 2020 - SPICE Kernels ===
+    "m2020_spice": {
+        "name": "Mars 2020 EDL SPICE kernels",
+        "files": [
+            (f"{_NAIF_M2020}/lsk/naif0012.tls", "lsk/naif0012.tls"),
+            (f"{_NAIF_M2020}/pck/pck00010.tpc", "pck/pck00010.tpc"),
+            (f"{_NAIF_M2020}/fk/m2020_v04.tf", "fk/m2020_v04.tf"),
+            (f"{_NAIF_M2020}/sclk/m2020_168_sclkscet_refit_v14.tsc", "sclk/m2020_sclk.tsc"),
+            (f"{_NAIF_M2020}/spk/de438s.bsp", "spk/de438s.bsp"),
+            (f"{_NAIF_M2020}/spk/mar097.bsp", "spk/mar097.bsp"),
+            (f"{_NAIF_M2020}/spk/m2020_edl_v01.bsp", "spk/m2020_edl_v01.bsp"),
+            (f"{_NAIF_M2020}/spk/m2020_ls_ops210303_iau2000_v1.bsp", "spk/m2020_ls.bsp"),
+            (f"{_NAIF_M2020}/ck/m2020_edl_v01.bc", "ck/m2020_edl_v01.bc"),
+        ],
+        "output": "data/m2020/spice",
+        "meta_kernel": "m2020_edl.tm",
+    },
 }
+
+
+def write_meta_kernel(output_dir: Path, kernel_files: list[str], name: str) -> Path:
+    """Generate a SPICE meta-kernel (.tm) file for the downloaded kernels."""
+    mk_path = output_dir / f"{name}"
+    abs_root = output_dir.resolve()
+
+    lines = [
+        "KPL/MK",
+        "",
+        f"Meta-kernel for {output_dir.name} (generated by download.py)",
+        "",
+        "\\begindata",
+        "",
+        f"   PATH_VALUES     = ( '{abs_root.as_posix()}' )",
+        "   PATH_SYMBOLS    = ( 'KERNELS' )",
+        "",
+        "   KERNELS_TO_LOAD = (",
+    ]
+    for kf in kernel_files:
+        lines.append(f"      '$KERNELS/{kf}'")
+    lines.extend([
+        "   )",
+        "",
+        "\\begintext",
+        "",
+    ])
+
+    mk_path.write_text("\n".join(lines), encoding="utf-8")
+    return mk_path
 
 
 def fetch_directory(url: str, pattern: str) -> list[str]:
@@ -254,11 +388,14 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
                     seen.add(fn)
                     files.append((dir_url + fn, fn))
         files.sort(key=lambda x: x[1])  # Sort by filename
+    elif "files" in config:
+        # Static file list (orbital maps, SPICE kernels)
+        files = [(url, fn) for url, fn in config["files"]]
     else:
         print("  Error: unknown dataset config")
         return
 
-    print(f"  Found {len(files)} files")
+    print(f"  {len(files)} files")
 
     if not files:
         return
@@ -267,14 +404,11 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
     first_url = files[0][0]
     sample_size = get_file_size(first_url)
     total_estimate = sample_size * len(files)
+
     if total_estimate >= 1e9:
-        print(
-            f"  Estimated size: {total_estimate / 1e9:.1f} GB ({sample_size / 1e6:.2f} MB × {len(files)})"
-        )
+        print(f"  Size: ~{total_estimate / 1e9:.1f} GB")
     else:
-        print(
-            f"  Estimated size: {total_estimate / 1e6:.0f} MB ({sample_size / 1e6:.2f} MB × {len(files)})"
-        )
+        print(f"  Size: ~{total_estimate / 1e6:.0f} MB")
 
     if dry_run:
         return
@@ -308,23 +442,60 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
 
     print(f"  Done: {downloaded} downloaded, {skipped} skipped")
 
+    # Generate meta-kernel for SPICE datasets
+    if "meta_kernel" in config and downloaded > 0:
+        kernel_files = [fn for _, fn in files]
+        mk = write_meta_kernel(output_dir, kernel_files, config["meta_kernel"])
+        print(f"  Meta-kernel: {mk}")
+
+
+def list_datasets() -> None:
+    """Print all available datasets grouped by mission."""
+    print("\nAvailable datasets:\n")
+
+    # Group by mission
+    msl = [(k, v) for k, v in DATASETS.items() if k.startswith("msl") or k.startswith("mardi")]
+    m2020 = [(k, v) for k, v in DATASETS.items() if k not in dict(msl)]
+
+    print("MSL Curiosity:")
+    for key, cfg in msl:
+        print(f"  {key:18} {cfg['name']}")
+
+    print("\nMars 2020 Perseverance:")
+    for key, cfg in m2020:
+        print(f"  {key:18} {cfg['name']}")
+
+    print("\nUsage: python download.py <dataset>")
+    print("       python download.py <dataset> -n  # Dry run (show size)")
+    print("       python download.py all           # Download everything")
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Download Mars EDL descent imagery")
+    parser = argparse.ArgumentParser(
+        description="Download Mars EDL data: imagery, orbital maps, SPICE kernels"
+    )
     parser.add_argument(
         "dataset",
         nargs="?",
         choices=list(DATASETS.keys()) + ["all"],
-        default="all",
-        help="Dataset to download (default: all)",
+        default=None,
+        help="Dataset to download",
     )
     parser.add_argument(
-        "--dry-run",
-        "-n",
+        "--list", "-l",
+        action="store_true",
+        help="List all available datasets",
+    )
+    parser.add_argument(
+        "--dry-run", "-n",
         action="store_true",
         help="Show what would be downloaded without downloading",
     )
     args = parser.parse_args()
+
+    if args.list or args.dataset is None:
+        list_datasets()
+        return
 
     if args.dataset == "all":
         for name, config in DATASETS.items():
