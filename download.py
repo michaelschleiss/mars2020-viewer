@@ -319,31 +319,31 @@ def fetch_inventory(url: str, filter_fn=None) -> list[str]:
 
 
 def download_file(
-    url: str, dest: Path, byte_progress: ByteProgress | None = None
+    url: str, dest: Path, byte_progress: ByteProgress | None = None, retries: int = 3
 ) -> bool:
-    """Download a single file. Returns True if downloaded, False if skipped.
-
-    Uses .partial suffix during download to prevent corrupt files from
-    being skipped on retry if download is interrupted.
-    """
+    """Download a single file. Returns True if downloaded, False if skipped."""
     if dest.exists():
         return False
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_suffix(dest.suffix + ".partial")
 
-    try:
-        with urllib.request.urlopen(url, timeout=120) as resp:
-            data = resp.read()
-        partial.write_bytes(data)
-        partial.rename(dest)  # atomic on same filesystem
-        if byte_progress:
-            byte_progress.add(len(data))
-        return True
-    except Exception as e:
-        partial.unlink(missing_ok=True)  # clean up partial on failure
-        print(f"  Error: {e}")
-        return False
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as resp:
+                data = resp.read()
+            partial.write_bytes(data)
+            partial.rename(dest)
+            if byte_progress:
+                byte_progress.add(len(data))
+            return True
+        except Exception as e:
+            partial.unlink(missing_ok=True)
+            if attempt < retries - 1:
+                time.sleep(1)
+            else:
+                print(f"  Error: {e}")
+    return False
 
 
 def get_file_size(url: str) -> int:
