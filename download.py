@@ -18,7 +18,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from tqdm import tqdm
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:  # pragma: no cover
+    tqdm = None
 
 try:
     import urllib3
@@ -104,6 +107,38 @@ class ByteProgress:
             )
 
 
+class _NoTqdmPbar:
+    """Minimal tqdm-compatible progress bar fallback (no dependencies)."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.n = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def set_description_str(self, _desc: str) -> None:
+        # Intentionally minimal; avoid noisy logs for large datasets.
+        return
+
+    def update(self, n: int) -> None:
+        self.n += n
+
+
+def _progress_bar(*, total: int, desc: str):
+    if tqdm is None:
+        return _NoTqdmPbar(total)
+    return tqdm(
+        total=total,
+        desc=desc,
+        unit="file",
+        bar_format="Downloading: [{bar:25}] {n}/{total} | {desc}",
+    )
+
+
 # =============================================================================
 # BASE URLs for data archives
 # =============================================================================
@@ -126,36 +161,79 @@ _LOSSLESS_FULL = lambda pid: "_n" in pid and "luj" in pid
 # =============================================================================
 # DATASET CONFIGURATIONS
 # =============================================================================
-#
-# Each dataset uses one of four download patterns:
-#
-# 1. "inventory" + "base" + "suffix"
-#    Mars 2020 PDS4 style: fetch CSV inventory, construct URLs from product IDs
-#    Example: LCAM, RDCAM, etc.
-#
-# 2. "directory" + "pattern"
-#    MSL PDS3 style: scrape HTML directory listing, match regex pattern
-#    Example: MARDI lossy
-#
-# 3. "directories" + "pattern"
-#    Like #2 but across multiple PDS volumes (deduplicates)
-#    Example: MARDI lossless (spread across volumes 1-3)
-#
-# 4. "files"
-#    Static file list: direct URL to filename mapping
-#    Example: Orbital maps, SPICE kernels
-#
-# Optional keys:
-#   "meta_kernel" - Generate SPICE .tm file after download
-#   "filter" - Function to filter product IDs (for inventory-based)
+
+def _pds4_edlcam(key: str, short: str, name: str, filter_fn) -> tuple[str, dict]:
+    return (
+        key,
+        {
+            "name": name,
+            "inventory": f"{_M2020_BASE}/data_sol0_{short}/collection_data_sol0_{short}_inventory.csv",
+            "base": f"{_M2020_BASE}/data_sol0_{short}/sol/00000/ids/fdr/edl/",
+            "output": f"data/m2020/{key}",
+            "suffix": "01.IMG",
+            "filter": filter_fn,
+        },
+    )
+
+
+def _files_from_base(base: str, rels: list[str | tuple[str, str]]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for rel in rels:
+        if isinstance(rel, tuple):
+            remote, local = rel
+        else:
+            remote = local = rel
+        out.append((f"{base}/{remote}", local))
+    return out
+
+
+_M2020_CAMS = [
+    _pds4_edlcam("lcam", "lcam", "LCAM - Lander Vision System (87 images)", None),
+    _pds4_edlcam("rdcam", "rdc", "RDCAM - Rover Downlook (lossless full-frames)", _LOSSLESS_FULL),
+    _pds4_edlcam("ddcam", "ddc", "DDCAM - Descent Stage Downlook (lossless full-frames)", _LOSSLESS_FULL),
+    _pds4_edlcam("rucam", "ruc", "RUCAM - Rover Uplook (lossless full-frames)", _LOSSLESS_FULL),
+    _pds4_edlcam("pucam1", "puc1", "PUCAM1 - Parachute Uplook 1 (lossless full-frames)", _LOSSLESS_FULL),
+    _pds4_edlcam("pucam2", "puc2", "PUCAM2 - Parachute Uplook 2 (lossless full-frames)", _LOSSLESS_FULL),
+    _pds4_edlcam("pucam3", "puc3", "PUCAM3 - Parachute Uplook 3 (lossless full-frames)", _LOSSLESS_FULL),
+]
+
+_MSL_SPICE_FILES = (
+    _files_from_base(
+        _NAIF_MSL,
+        [
+            "spk/msl_edl_v01.bsp",
+            "spk/msl_struct_v02.bsp",
+            "ck/msl_edl_v01.bc",
+            "fk/msl.tf",
+            ("ik/msl_mardi_20120731_c02.ti", "ik/msl_mardi.ti"),
+            "sclk/msl.tsc",
+            "lsk/naif0012.tls",
+        ],
+    )
+    + _files_from_base(_NAIF_GENERIC, ["pck/pck00010.tpc"])
+)
+
+_M2020_SPICE_FILES = _files_from_base(
+    _NAIF_M2020,
+    [
+        "lsk/naif0012.tls",
+        "pck/pck00010.tpc",
+        "fk/m2020_v04.tf",
+        ("sclk/m2020_168_sclkscet_refit_v14.tsc", "sclk/m2020_sclk.tsc"),
+        "spk/de438s.bsp",
+        "spk/mar097.bsp",
+        "spk/m2020_edl_v01.bsp",
+        ("spk/m2020_ls_ops210303_iau2000_v1.bsp", "spk/m2020_ls.bsp"),
+        "ck/m2020_edl_v01.bc",
+    ],
+)
 
 DATASETS = {
-    # === MSL Curiosity ===
     "mardi": {
         "name": "MARDI RDR - Sol 0000 (E01_DRCL label+image pairs)",
         "directory": f"{_MSL_BASE}/MSLMRD_0001/DATA/RDR/SURFACE/0000/",
         "output": "data/msl/rdr",
-        "pattern": r"0000MD\d+E01_DRCL\.(LBL|IMG)",
+        "pattern": r"0000MD\d+E01_DRCL\.(?:LBL|IMG)",
     },
     "mardi_lossless": {
         "name": "MARDI RDR lossless subset - Sol 0000 (C00/C01_DRCL pairs across volumes)",
@@ -165,66 +243,9 @@ DATASETS = {
             f"{_MSL_BASE}/MSLMRD_0003/DATA/RDR/SURFACE/0000/",
         ],
         "output": "data/msl/rdr",
-        "pattern": r"0000MD\d+C0[01]_DRCL\.(LBL|IMG)",
+        "pattern": r"0000MD\d+C0[01]_DRCL\.(?:LBL|IMG)",
     },
-    # === Mars 2020 Perseverance ===
-    "lcam": {
-        "name": "LCAM - Lander Vision System (87 images)",
-        "inventory": f"{_M2020_BASE}/data_sol0_lcam/collection_data_sol0_lcam_inventory.csv",
-        "base": f"{_M2020_BASE}/data_sol0_lcam/sol/00000/ids/fdr/edl/",
-        "output": "data/m2020/lcam",
-        "suffix": "01.IMG",
-        "filter": None,
-    },
-    "rdcam": {
-        "name": "RDCAM - Rover Downlook (7141 lossless full-frames)",
-        "inventory": f"{_M2020_BASE}/data_sol0_rdc/collection_data_sol0_rdc_inventory.csv",
-        "base": f"{_M2020_BASE}/data_sol0_rdc/sol/00000/ids/fdr/edl/",
-        "output": "data/m2020/rdcam",
-        "suffix": "01.IMG",
-        "filter": _LOSSLESS_FULL,
-    },
-    "ddcam": {
-        "name": "DDCAM - Descent Stage Downlook (1985 products)",
-        "inventory": f"{_M2020_BASE}/data_sol0_ddc/collection_data_sol0_ddc_inventory.csv",
-        "base": f"{_M2020_BASE}/data_sol0_ddc/sol/00000/ids/fdr/edl/",
-        "output": "data/m2020/ddcam",
-        "suffix": "01.IMG",
-        "filter": _LOSSLESS_FULL,
-    },
-    "rucam": {
-        "name": "RUCAM - Rover Uplook (8987 products)",
-        "inventory": f"{_M2020_BASE}/data_sol0_ruc/collection_data_sol0_ruc_inventory.csv",
-        "base": f"{_M2020_BASE}/data_sol0_ruc/sol/00000/ids/fdr/edl/",
-        "output": "data/m2020/rucam",
-        "suffix": "01.IMG",
-        "filter": _LOSSLESS_FULL,
-    },
-    "pucam1": {
-        "name": "PUCAM1 - Parachute Uplook 1 (10686 products)",
-        "inventory": f"{_M2020_BASE}/data_sol0_puc1/collection_data_sol0_puc1_inventory.csv",
-        "base": f"{_M2020_BASE}/data_sol0_puc1/sol/00000/ids/fdr/edl/",
-        "output": "data/m2020/pucam1",
-        "suffix": "01.IMG",
-        "filter": _LOSSLESS_FULL,
-    },
-    "pucam2": {
-        "name": "PUCAM2 - Parachute Uplook 2",
-        "inventory": f"{_M2020_BASE}/data_sol0_puc2/collection_data_sol0_puc2_inventory.csv",
-        "base": f"{_M2020_BASE}/data_sol0_puc2/sol/00000/ids/fdr/edl/",
-        "output": "data/m2020/pucam2",
-        "suffix": "01.IMG",
-        "filter": _LOSSLESS_FULL,
-    },
-    "pucam3": {
-        "name": "PUCAM3 - Parachute Uplook 3",
-        "inventory": f"{_M2020_BASE}/data_sol0_puc3/collection_data_sol0_puc3_inventory.csv",
-        "base": f"{_M2020_BASE}/data_sol0_puc3/sol/00000/ids/fdr/edl/",
-        "output": "data/m2020/pucam3",
-        "suffix": "01.IMG",
-        "filter": _LOSSLESS_FULL,
-    },
-    # === MSL Curiosity - Orbital Maps ===
+    **dict(_M2020_CAMS),
     "msl_orbital": {
         "name": "MSL Gale merged ortho + DEM",
         "files": [
@@ -232,30 +253,16 @@ DATASETS = {
                 "https://asc-pds-services.s3.us-west-2.amazonaws.com/mosaic/MSL_Gale_Orthophoto_Mosaic_25cm_v3.tif",
                 "MSL_Gale_Orthophoto_Mosaic_25cm_v3.tif",
             ),
-            (
-                f"{_USGS_MSL}/MSL_Gale_DEM_Mosaic_1m_v3.tif",
-                "MSL_Gale_DEM_Mosaic_1m_v3.tif",
-            ),
+            (f"{_USGS_MSL}/MSL_Gale_DEM_Mosaic_1m_v3.tif", "MSL_Gale_DEM_Mosaic_1m_v3.tif"),
         ],
         "output": "data/msl/orbital",
     },
-    # === MSL Curiosity - SPICE Kernels ===
     "msl_spice": {
         "name": "MSL EDL SPICE kernels",
-        "files": [
-            (f"{_NAIF_MSL}/spk/msl_edl_v01.bsp", "spk/msl_edl_v01.bsp"),
-            (f"{_NAIF_MSL}/spk/msl_struct_v02.bsp", "spk/msl_struct_v02.bsp"),
-            (f"{_NAIF_MSL}/ck/msl_edl_v01.bc", "ck/msl_edl_v01.bc"),
-            (f"{_NAIF_MSL}/fk/msl.tf", "fk/msl.tf"),
-            (f"{_NAIF_MSL}/ik/msl_mardi_20120731_c02.ti", "ik/msl_mardi.ti"),
-            (f"{_NAIF_MSL}/sclk/msl.tsc", "sclk/msl.tsc"),
-            (f"{_NAIF_MSL}/lsk/naif0012.tls", "lsk/naif0012.tls"),
-            (f"{_NAIF_GENERIC}/pck/pck00010.tpc", "pck/pck00010.tpc"),
-        ],
+        "files": _MSL_SPICE_FILES,
         "output": "data/msl/spice",
         "meta_kernel": "msl_edl.tm",
     },
-    # === Mars 2020 - Orbital Maps ===
     "ctx": {
         "name": "CTX Jezero ortho + DTM (TRN reference)",
         "files": [
@@ -284,20 +291,9 @@ DATASETS = {
         ],
         "output": "data/m2020/orbital/hirise",
     },
-    # === Mars 2020 - SPICE Kernels ===
     "m2020_spice": {
         "name": "Mars 2020 EDL SPICE kernels",
-        "files": [
-            (f"{_NAIF_M2020}/lsk/naif0012.tls", "lsk/naif0012.tls"),
-            (f"{_NAIF_M2020}/pck/pck00010.tpc", "pck/pck00010.tpc"),
-            (f"{_NAIF_M2020}/fk/m2020_v04.tf", "fk/m2020_v04.tf"),
-            (f"{_NAIF_M2020}/sclk/m2020_168_sclkscet_refit_v14.tsc", "sclk/m2020_sclk.tsc"),
-            (f"{_NAIF_M2020}/spk/de438s.bsp", "spk/de438s.bsp"),
-            (f"{_NAIF_M2020}/spk/mar097.bsp", "spk/mar097.bsp"),
-            (f"{_NAIF_M2020}/spk/m2020_edl_v01.bsp", "spk/m2020_edl_v01.bsp"),
-            (f"{_NAIF_M2020}/spk/m2020_ls_ops210303_iau2000_v1.bsp", "spk/m2020_ls.bsp"),
-            (f"{_NAIF_M2020}/ck/m2020_edl_v01.bc", "ck/m2020_edl_v01.bc"),
-        ],
+        "files": _M2020_SPICE_FILES,
         "output": "data/m2020/spice",
         "meta_kernel": "m2020_edl.tm",
     },
@@ -385,6 +381,43 @@ def fetch_inventory(url: str, filter_fn=None) -> list[str]:
     return product_ids
 
 
+class _HttpResponse:
+    def __init__(self, *, status: int, headers, reader, releaser):
+        self.status = status
+        self.headers = headers
+        self._reader = reader
+        self._releaser = releaser
+
+    def read(self, n: int) -> bytes:
+        return self._reader(n)
+
+    def close(self) -> None:
+        self._releaser()
+
+
+def _http_open(url: str, *, method: str = "GET", headers: dict[str, str] | None = None, timeout_s: float = 120.0) -> _HttpResponse:
+    """Open an HTTP request via urllib3 (if available) else urllib.request."""
+    if urllib3 is not None:
+        pool = _get_urllib3_pool()
+        resp = pool.request(method, url, headers=headers, preload_content=False)
+        return _HttpResponse(
+            status=int(resp.status),
+            headers=resp.headers,
+            reader=resp.read,
+            releaser=resp.release_conn,
+        )
+
+    req = _request(url, method=method, headers=headers or {})
+    resp = urllib.request.urlopen(req, timeout=timeout_s)
+    status = getattr(resp, "status", resp.getcode())
+    return _HttpResponse(
+        status=int(status),
+        headers=resp.headers,
+        reader=resp.read,
+        releaser=resp.close,
+    )
+
+
 def download_file(
     url: str, dest: Path, byte_progress: ByteProgress | None = None, retries: int = 3
 ) -> bool:
@@ -400,69 +433,41 @@ def download_file(
     for attempt in range(retries):
         try:
             resume_from = partial.stat().st_size if partial.exists() else 0
-            headers = {"Range": f"bytes={resume_from}-"} if resume_from > 0 else None
+            range_headers = {"Range": f"bytes={resume_from}-"} if resume_from > 0 else None
 
-            if urllib3 is not None:
-                pool = _get_urllib3_pool()
-                resp = pool.request("GET", url, headers=headers, preload_content=False)
-                try:
-                    if resp.status == 416 and resume_from > 0:
-                        partial.unlink(missing_ok=True)
-                        preexisting_partial_bytes = 0
-                        continue
-                    if resp.status not in (200, 206):
-                        raise RuntimeError(f"HTTP {resp.status}")
+            resp = _http_open(url, headers=range_headers, timeout_s=120.0)
+            try:
+                if resp.status == 416 and resume_from > 0:
+                    partial.unlink(missing_ok=True)
+                    preexisting_partial_bytes = 0
+                    continue
+                if resp.status not in (200, 206):
+                    raise RuntimeError(f"HTTP {resp.status}")
 
-                    if (
-                        resp.status == 206
-                        and resume_from > 0
-                        and preexisting_partial_bytes > 0
-                        and not counted_preexisting
-                        and byte_progress
-                    ):
-                        byte_progress.add_existing_bytes(preexisting_partial_bytes)
-                        counted_preexisting = True
-                    elif resp.status == 200 and resume_from > 0:
-                        preexisting_partial_bytes = 0
-                        counted_preexisting = True
+                if (
+                    resp.status == 206
+                    and resume_from > 0
+                    and preexisting_partial_bytes > 0
+                    and not counted_preexisting
+                    and byte_progress
+                ):
+                    byte_progress.add_existing_bytes(preexisting_partial_bytes)
+                    counted_preexisting = True
+                elif resp.status == 200 and resume_from > 0:
+                    preexisting_partial_bytes = 0
+                    counted_preexisting = True
 
-                    mode = "ab" if resp.status == 206 and resume_from > 0 else "wb"
-                    with partial.open(mode) as f:
-                        while True:
-                            chunk = resp.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            if byte_progress:
-                                byte_progress.add_bytes(len(chunk))
-                finally:
-                    resp.release_conn()
-            else:
-                req = _request(url, headers=headers or {})
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    status = getattr(resp, "status", resp.getcode())
-                    if (
-                        status == 206
-                        and resume_from > 0
-                        and preexisting_partial_bytes > 0
-                        and not counted_preexisting
-                        and byte_progress
-                    ):
-                        byte_progress.add_existing_bytes(preexisting_partial_bytes)
-                        counted_preexisting = True
-                    elif status == 200 and resume_from > 0:
-                        preexisting_partial_bytes = 0
-                        counted_preexisting = True
-
-                    mode = "ab" if status == 206 and resume_from > 0 else "wb"
-                    with partial.open(mode) as f:
-                        while True:
-                            chunk = resp.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            if byte_progress:
-                                byte_progress.add_bytes(len(chunk))
+                mode = "ab" if resp.status == 206 and resume_from > 0 else "wb"
+                with partial.open(mode) as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        if byte_progress:
+                            byte_progress.add_bytes(len(chunk))
+            finally:
+                resp.close()
 
             partial.rename(dest)
             return True
@@ -484,16 +489,11 @@ def download_file(
 
 def get_file_size(url: str) -> int:
     """Get file size via HEAD request."""
-    if urllib3 is not None:
-        pool = _get_urllib3_pool()
-        resp = pool.request("HEAD", url, preload_content=False)
-        try:
-            return int(resp.headers.get("Content-Length") or 0)
-        finally:
-            resp.release_conn()
-    req = _request(url, method="HEAD")
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return int(resp.headers.get("Content-Length", 0))
+    resp = _http_open(url, method="HEAD", timeout_s=10.0)
+    try:
+        return int(resp.headers.get("Content-Length") or 0)
+    finally:
+        resp.close()
 
 
 def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
@@ -582,12 +582,7 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
     else:
         init_desc = f"⏱ 0:00/--:-- | ↓ 0/{est_total_mb:.0f}MB @ --MB/s"
 
-    with tqdm(
-        total=len(files),
-        desc=init_desc,
-        unit="file",
-        bar_format="Downloading: [{bar:25}] {n}/{total} | {desc}",
-    ) as pbar:
+    with _progress_bar(total=len(files), desc=init_desc) as pbar:
         byte_progress = ByteProgress(pbar, len(files), total_estimate)
 
         for url, filename in files:
