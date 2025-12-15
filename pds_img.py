@@ -43,7 +43,15 @@ def infer_pds3_layout(path: str | Path) -> Tuple[Pds3ImageLayout, Dict[str, str]
 
     def get_int(key: str, default: int = 0) -> int:
         val = meta.get(key)
-        return int(val) if val is not None else default
+        if val is None:
+            return default
+        # Handle detached labels where ^IMAGE points to filename
+        if isinstance(val, str) and not val.isdigit():
+            return default
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
 
     # IMAGE properties are nested under 'IMAGE' group
     img_meta = meta.get("IMAGE", {})
@@ -52,10 +60,17 @@ def infer_pds3_layout(path: str | Path) -> Tuple[Pds3ImageLayout, Dict[str, str]
         val = img_meta.get(key) if img_meta else None
         return int(val) if val is not None else default
 
+    # For detached labels, ^IMAGE contains filename - default to record 1
+    image_record_val = meta.get("^IMAGE")
+    if isinstance(image_record_val, str) and not image_record_val.isdigit():
+        image_record = 1  # Image starts at byte 0 in detached file
+    else:
+        image_record = get_int("^IMAGE")
+
     layout = Pds3ImageLayout(
         record_bytes=get_int("RECORD_BYTES"),
         label_records=get_int("LABEL_RECORDS"),
-        image_record=get_int("^IMAGE"),
+        image_record=image_record,
         lines=get_img_int("LINES"),
         line_samples=get_img_int("LINE_SAMPLES"),
         bands=get_img_int("BANDS", 1),
@@ -77,9 +92,9 @@ def read_image_bytes(path: str | Path) -> Tuple[bytes, Pds3ImageLayout, Dict[str
     data = pdr.read(str(path))
     layout, label = infer_pds3_layout(path)
 
-    # Convert numpy array to bytes
-    image_array = data["IMAGE"]
-    image_bytes = image_array.astype(np.uint8).tobytes()
+    # Preserve the native dtype to avoid truncating >8-bit products.
+    image_array = np.asarray(data["IMAGE"])
+    image_bytes = image_array.tobytes()
 
     return image_bytes, layout, label
 
