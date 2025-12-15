@@ -66,6 +66,69 @@ Notes:
   - This corresponds to the common **RGGB** pattern (top-left is red). The viewer defaults to this via `--demosaic auto` in `tools/msl_mardi_view.py`.
 - See [MARDI_SENSOR.md](MARDI_SENSOR.md) for Bayer pattern, processing pipeline, and dark columns.
 
+## MARDI Sol 0000 Product Variants (“Quality” Matrix)
+
+MSL MMM product IDs encode two different axes that often get conflated as “quality”:
+
+- **`PGV`** (the 3 chars just before `_`): **product type** + **GOP index** + **version** (from the MMM Data Product SIS “PICNO” naming scheme).
+  - `P` is the important part for MARDI: it tells you whether the camera returned a **lossy JPEG** (`E..`) or a **lossless** product (`C..`), or a **thumbnail** (`I..`).
+- **Processing code** (the 4 chars after `_`): **ground processing** performed (`XXXX` for EDR, `DRXX/DRCX/DRLX/DRCL` for RDR; see [MARDI_SENSOR.md](MARDI_SENSOR.md)).
+
+### How Many Images Exist In The Sol 0000 EDL Sequence?
+
+Malin et al. (2017) describes the Sol 0000 EDL imaging sequence as **1504 commanded frames** (“commanded as 1504 frames at the maximum frame rate…”; see `out/docs_text/Malin2017_MSL_MARDI_Mastcam.txt:1057`).
+
+The commonly used “descent” subset is **626 in-flight frames** (heat-shield separation → touchdown), which corresponds to `CCCCC=00001..00626` in the EDL PICNO naming used by MARDI.
+
+### Why Does `C00` Look “Missing”?
+
+Because it’s a **lossless re-downlink of only a subset** of frames, not a complete alternate archive of the sequence:
+
+> “Most Mastcam and MARDI images are downlinked as color JPEGs; when downlink data volumes permit, a subset is downlinked a second time with lossless compression…”  
+> — Malin et al. (2017), Section 7.7.3 (see `out/docs_text/Malin2017_MSL_MARDI_Mastcam.txt:1182` and `out/docs_text/Malin2017_MSL_MARDI_Mastcam.txt:1190`)
+
+This also shows up in the PDS labels: the **same frame** can have an early `EARTH_RECEIVED_START_TIME` for the JPEG (`E01`) and a much later one for the lossless (`C00`), consistent with “re-downlinked later”.
+
+### `PGV` Codes You’ll See For MARDI Sol 0000
+
+The MMM Data Product SIS defines the `P` (product-type) letter (Table “Image ID or PICNO”; see `out/msl_mmm_docs/MSL_MMM_EDR_RDR_DPSIS.txt:983`):
+
+| `PGV` example | `P` | Meaning (SIS) | What it is in practice |
+|---|---:|---|---|
+| `E01` | `E` | JPEG 4:2:2 image | Full-frame, lossy JPEG downlink (most common for MARDI) |
+| `I01` | `I` | JPEG 4:4:4 thumbnail | Small thumbnail companion product |
+| `C00` | `C` | Losslessly compressed raster 8-bit image | Full-frame, lossless subset (re-downlinked later when volume permits) |
+| `C01` | `C` | Losslessly compressed raster 8-bit image | Same as `C00`, but a different “version” (`V=1`) |
+
+### What Exists Where (PDS Volumes)
+
+**`MSLMRD_0001` (RDR, Sol 0000, full 1504-frame sequence)**  
+Directory: `https://planetarydata.jpl.nasa.gov/img/data/msl/MSLMRD_0001/DATA/RDR/SURFACE/0000/`
+
+- `E01`: present across `CCCCC=00001..01504` (full sequence; multiple RDR processing codes).
+- `I01`: present across `CCCCC=00001..01504` (thumbnail companion; multiple RDR processing codes).
+- `C00`: present only for a **small subset** of frames in this directory (observed: `350, 354, 451, 461, 471, 481, 491, 501, 513, 525, 526, 532, 534, 543, 545, 1504`).
+
+**`MSLMRD_0003` (EDL-phase subset, lossless-focused)**  
+Index sources:
+- `https://planetarydata.jpl.nasa.gov/img/data/msl/MSLMRD_0003/INDEX/EDRINDEX.TAB`
+- `https://planetarydata.jpl.nasa.gov/img/data/msl/MSLMRD_0003/INDEX/RDRINDEX.TAB`
+
+For `MISSION_PHASE_NAME="ENTRY, DESCENT, AND LANDING"` and `INSTRUMENT_ID="MD"`:
+- EDR contains **192 frames total**: `C00=187` and `C01=5`.
+- RDR contains those same 192 frames for each of the 4 processing codes (`DRXX/DRCX/DRLX/DRCL`) → **768 RDR products** total.
+
+This is the root cause of the “~180 images” surprise: if you download only `*_C00_DRCL` from `MSLMRD_0003`, you get **187 frames**.
+
+### Lossless Frame Coverage (From Local Inventory)
+
+If you’ve fetched `data/msl_mardi_volume0003/rdr/*C00*DRCL*`, the `C00` frames present locally are:
+
+- `CCCCC` ranges (15 ranges, 187 frames):  
+  `(215,215), (296,297), (313,317), (319,337), (339,349), (351,353), (355,359), (361,379), (381,399), (402,410), (412,420), (422,430), (432,440), (442,448), (601,660)`
+
+The remaining lossless frames in `MSLMRD_0003` are `C01` (5 frames): `350, 354, 513, 525, 526`.
+
 ## Local Conventions (This Repo)
 
 - Existing local set (already downloaded): `data/msl/{labels,images}/`
@@ -93,4 +156,3 @@ Local helper scripts in this repo:
 - `tools/usgs_fetch_msl_labels.py` downloads the USGS PDS3/ISIS3 labels into `out/usgs_msl_labels/`.
 - `tools/spice_fetch_msl_edl.py` downloads a minimal MSL EDL kernel set and writes a meta-kernel for `spiceypy`.
 - `tools/msl_mardi_trajectory.py` uses those kernels + `data/msl/labels/*.LBL` to write a time-synced trajectory CSV.
-

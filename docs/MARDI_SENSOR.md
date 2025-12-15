@@ -1,4 +1,4 @@
-# MSL MARDI Technical Notes
+# MARDI Sensor Notes
 
 ## Bayer Pattern
 
@@ -33,6 +33,18 @@ Source: MSL MMM EDR/RDR Data Product SIS (`out/msl_mmm_docs/MSL_MMM_EDR_RDR_DPSI
 8. Radiometric calibration
 9. Color correction
 10. Geometric linearization
+
+## Onboard Encoding (`PGV`) vs Ground Processing Code
+
+MMM image products encode two independent “flavors” directly in the `PRODUCT_ID` / filename:
+
+- `...CCCCC PGV _PROC.EXT`
+  - `PGV` = product type (`P`) + GOP index (`G`) + version (`V`)
+  - `PROC` = ground processing code (`XXXX` for EDR; `DRXX/DRCX/DRLX/DRCL` for RDR)
+
+For example, `...0313E01_DRCL` and `...0313C00_DRCL` refer to the same underlying frame number (`CCCCC=00313`) but different onboard/downlinked encodings (`E..` is JPEG, `C..` is lossless). The MMM Data Product SIS defines these fields in the “PICNO” naming scheme (see `out/msl_mmm_docs/MSL_MMM_EDR_RDR_DPSIS.txt:983`).
+
+Note: if you ever see something like `R01`, the `P=R` product type is defined by the SIS as a **“JPEG 444 focus merge image”** (see `out/msl_mmm_docs/MSL_MMM_EDR_RDR_DPSIS.txt:1005`; unrelated to MARDI).
 
 ## Dark Columns ("Black Border")
 
