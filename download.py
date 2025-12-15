@@ -340,7 +340,7 @@ def download_file(
         except Exception as e:
             partial.unlink(missing_ok=True)
             if attempt < retries - 1:
-                time.sleep(1)
+                time.sleep(2 ** attempt)  # 1s, 2s, 4s...
             else:
                 print(f"  Error: {e}")
     return False
