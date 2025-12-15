@@ -475,11 +475,9 @@ def main():
         description="Download Mars EDL data: imagery, orbital maps, SPICE kernels"
     )
     parser.add_argument(
-        "dataset",
-        nargs="?",
-        choices=list(DATASETS.keys()) + ["all"],
-        default=None,
-        help="Dataset to download",
+        "datasets",
+        nargs="*",
+        help="Dataset(s) to download (or 'all')",
     )
     parser.add_argument(
         "--list", "-l",
@@ -493,15 +491,23 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.list or args.dataset is None:
+    if args.list or not args.datasets:
         list_datasets()
         return
 
-    if args.dataset == "all":
-        for name, config in DATASETS.items():
-            download_dataset(name, config, dry_run=args.dry_run)
-    else:
-        download_dataset(args.dataset, DATASETS[args.dataset], dry_run=args.dry_run)
+    # Expand 'all' and validate dataset names
+    datasets = []
+    for name in args.datasets:
+        if name == "all":
+            datasets.extend(DATASETS.keys())
+        elif name in DATASETS:
+            datasets.append(name)
+        else:
+            print(f"Unknown dataset: {name}")
+            return
+
+    for name in datasets:
+        download_dataset(name, DATASETS[name], dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
