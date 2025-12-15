@@ -3,12 +3,13 @@
 
 Usage:
     python download.py              # Download all cameras
-    python download.py lcam         # Download LCAM (87 images, ~91 MB)
-    python download.py rdcam        # Download RDCAM (7141 images, ~28 GB)
+    python download.py lcam         # Mars 2020 LCAM (87 images, ~91 MB)
+    python download.py mardi        # MSL MARDI (1504 images, ~165 MB)
     python download.py --dry-run    # Show sizes without downloading
 """
 
 import argparse
+import re
 import threading
 import time
 import urllib.request
@@ -69,67 +70,86 @@ class ByteProgress:
 #   edf_0000_{sclk}_{seq}fdr_t{frame}edlc{seq}_0000fhj  # thumbnail compressed
 #   Filter: "_n" (full-frame) + "luj" (lossless) → 7141 of 19712 products
 #
-_BASE = "https://planetarydata.jpl.nasa.gov/img/data/mars2020/mars2020_edlcam_ops_calibrated"
+_M2020_BASE = "https://planetarydata.jpl.nasa.gov/img/data/mars2020/mars2020_edlcam_ops_calibrated"
+_MSL_BASE = "https://planetarydata.jpl.nasa.gov/img/data/msl"
 _LOSSLESS_FULL = lambda pid: "_n" in pid and "luj" in pid
 
 DATASETS = {
+    # === MSL Curiosity ===
+    "mardi": {
+        "name": "MARDI - Mars Descent Imager (1504 images, ~165 MB)",
+        "directory": f"{_MSL_BASE}/MSLMRD_0001/DATA/EDR/SURFACE/0000/",
+        "output": "data/msl/mardi",
+        "pattern": r"0000MD\d+E01_XXXX\.DAT",  # EDR image data files only
+    },
+    # === Mars 2020 Perseverance ===
     "lcam": {
         "name": "LCAM - Lander Vision System (87 images, ~91 MB)",
-        "inventory": f"{_BASE}/data_sol0_lcam/collection_data_sol0_lcam_inventory.csv",
-        "base": f"{_BASE}/data_sol0_lcam/sol/00000/ids/fdr/edl/",
+        "inventory": f"{_M2020_BASE}/data_sol0_lcam/collection_data_sol0_lcam_inventory.csv",
+        "base": f"{_M2020_BASE}/data_sol0_lcam/sol/00000/ids/fdr/edl/",
         "output": "data/m2020/lcam",
         "suffix": "01.IMG",
         "filter": None,
     },
     "rdcam": {
         "name": "RDCAM - Rover Downlook (7141 lossless full-frames, ~27 GB)",
-        "inventory": f"{_BASE}/data_sol0_rdc/collection_data_sol0_rdc_inventory.csv",
-        "base": f"{_BASE}/data_sol0_rdc/sol/00000/ids/fdr/edl/",
+        "inventory": f"{_M2020_BASE}/data_sol0_rdc/collection_data_sol0_rdc_inventory.csv",
+        "base": f"{_M2020_BASE}/data_sol0_rdc/sol/00000/ids/fdr/edl/",
         "output": "data/m2020/rdcam",
         "suffix": "01.IMG",
         "filter": _LOSSLESS_FULL,
     },
     "ddcam": {
         "name": "DDCAM - Descent Stage Downlook (1985 products)",
-        "inventory": f"{_BASE}/data_sol0_ddc/collection_data_sol0_ddc_inventory.csv",
-        "base": f"{_BASE}/data_sol0_ddc/sol/00000/ids/fdr/edl/",
+        "inventory": f"{_M2020_BASE}/data_sol0_ddc/collection_data_sol0_ddc_inventory.csv",
+        "base": f"{_M2020_BASE}/data_sol0_ddc/sol/00000/ids/fdr/edl/",
         "output": "data/m2020/ddcam",
         "suffix": "01.IMG",
         "filter": _LOSSLESS_FULL,
     },
     "rucam": {
         "name": "RUCAM - Rover Uplook (8987 products)",
-        "inventory": f"{_BASE}/data_sol0_ruc/collection_data_sol0_ruc_inventory.csv",
-        "base": f"{_BASE}/data_sol0_ruc/sol/00000/ids/fdr/edl/",
+        "inventory": f"{_M2020_BASE}/data_sol0_ruc/collection_data_sol0_ruc_inventory.csv",
+        "base": f"{_M2020_BASE}/data_sol0_ruc/sol/00000/ids/fdr/edl/",
         "output": "data/m2020/rucam",
         "suffix": "01.IMG",
         "filter": _LOSSLESS_FULL,
     },
     "pucam1": {
         "name": "PUCAM1 - Parachute Uplook 1 (10686 products)",
-        "inventory": f"{_BASE}/data_sol0_puc1/collection_data_sol0_puc1_inventory.csv",
-        "base": f"{_BASE}/data_sol0_puc1/sol/00000/ids/fdr/edl/",
+        "inventory": f"{_M2020_BASE}/data_sol0_puc1/collection_data_sol0_puc1_inventory.csv",
+        "base": f"{_M2020_BASE}/data_sol0_puc1/sol/00000/ids/fdr/edl/",
         "output": "data/m2020/pucam1",
         "suffix": "01.IMG",
         "filter": _LOSSLESS_FULL,
     },
     "pucam2": {
         "name": "PUCAM2 - Parachute Uplook 2",
-        "inventory": f"{_BASE}/data_sol0_puc2/collection_data_sol0_puc2_inventory.csv",
-        "base": f"{_BASE}/data_sol0_puc2/sol/00000/ids/fdr/edl/",
+        "inventory": f"{_M2020_BASE}/data_sol0_puc2/collection_data_sol0_puc2_inventory.csv",
+        "base": f"{_M2020_BASE}/data_sol0_puc2/sol/00000/ids/fdr/edl/",
         "output": "data/m2020/pucam2",
         "suffix": "01.IMG",
         "filter": _LOSSLESS_FULL,
     },
     "pucam3": {
         "name": "PUCAM3 - Parachute Uplook 3",
-        "inventory": f"{_BASE}/data_sol0_puc3/collection_data_sol0_puc3_inventory.csv",
-        "base": f"{_BASE}/data_sol0_puc3/sol/00000/ids/fdr/edl/",
+        "inventory": f"{_M2020_BASE}/data_sol0_puc3/collection_data_sol0_puc3_inventory.csv",
+        "base": f"{_M2020_BASE}/data_sol0_puc3/sol/00000/ids/fdr/edl/",
         "output": "data/m2020/pucam3",
         "suffix": "01.IMG",
         "filter": _LOSSLESS_FULL,
     },
 }
+
+
+def fetch_directory(url: str, pattern: str) -> list[str]:
+    """Fetch directory listing and return files matching pattern."""
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        html = resp.read().decode("utf-8")
+
+    # Extract filenames from directory listing
+    files = re.findall(pattern, html)
+    return sorted(set(files))
 
 
 def fetch_inventory(url: str, filter_fn=None) -> list[str]:
@@ -185,26 +205,40 @@ def get_file_size(url: str) -> int:
 def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
     """Download all files for a dataset."""
     print(f"\n{config['name']}")
-    print("  Fetching inventory...")
-
-    product_ids = fetch_inventory(config["inventory"], config.get("filter"))
-    print(f"  Found {len(product_ids)} products")
-
-    if not product_ids:
-        return
 
     output_dir = Path(config["output"])
-    base_url = config["base"]
-    suffix = config["suffix"]
+
+    # Determine file list based on dataset type
+    if "inventory" in config:
+        # Mars 2020 style: inventory CSV + base URL + suffix
+        print("  Fetching inventory...")
+        product_ids = fetch_inventory(config["inventory"], config.get("filter"))
+        base_url = config["base"]
+        suffix = config["suffix"]
+        files = [(base_url + pid.upper() + suffix, pid.upper() + suffix) for pid in product_ids]
+    elif "directory" in config:
+        # MSL style: directory listing + pattern
+        print("  Fetching directory listing...")
+        filenames = fetch_directory(config["directory"], config["pattern"])
+        base_url = config["directory"]
+        files = [(base_url + fn, fn) for fn in filenames]
+    else:
+        print("  Error: unknown dataset config")
+        return
+
+    print(f"  Found {len(files)} files")
+
+    if not files:
+        return
 
     # Estimate total size from first file
-    first_url = base_url + product_ids[0].upper() + suffix
+    first_url = files[0][0]
     sample_size = get_file_size(first_url)
-    total_estimate = sample_size * len(product_ids)
+    total_estimate = sample_size * len(files)
     if total_estimate >= 1e9:
-        print(f"  Estimated size: {total_estimate/1e9:.1f} GB ({sample_size/1e6:.1f} MB × {len(product_ids)})")
+        print(f"  Estimated size: {total_estimate/1e9:.1f} GB ({sample_size/1e6:.2f} MB × {len(files)})")
     else:
-        print(f"  Estimated size: {total_estimate/1e6:.0f} MB ({sample_size/1e6:.1f} MB × {len(product_ids)})")
+        print(f"  Estimated size: {total_estimate/1e6:.0f} MB ({sample_size/1e6:.2f} MB × {len(files)})")
 
     if dry_run:
         return
@@ -213,24 +247,22 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
     skipped = 0
 
     # Initial description with estimate
-    est_total_mb = sample_size * len(product_ids) / 1_000_000
+    est_total_mb = sample_size * len(files) / 1_000_000
     if est_total_mb >= 1000:
         init_desc = f"⏱ 0:00/--:-- | ↓ 0/{est_total_mb/1000:.1f}GB @ --MB/s"
     else:
         init_desc = f"⏱ 0:00/--:-- | ↓ 0/{est_total_mb:.0f}MB @ --MB/s"
 
     with tqdm(
-        total=len(product_ids),
+        total=len(files),
         desc=init_desc,
         unit="file",
         bar_format="Downloading: [{bar:25}] {n}/{total} | {desc}",
     ) as pbar:
-        byte_progress = ByteProgress(pbar, len(product_ids), sample_size)
+        byte_progress = ByteProgress(pbar, len(files), sample_size)
 
-        for pid in product_ids:
-            filename = pid.upper() + suffix
+        for url, filename in files:
             dest = output_dir / filename
-            url = base_url + filename
 
             if download_file(url, dest, byte_progress):
                 downloaded += 1
