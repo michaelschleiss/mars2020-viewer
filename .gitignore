@@ -1,5 +1,22 @@
+# OS
 .DS_Store
-__pycache__/
 
+# Python
+__pycache__/
+*.pyc
+
+# Data (downloaded from PDS/USGS)
+data/
+spice_kernels/
+spice_kernels.zip
+
+# Output artifacts
+out/
+*.json
+
+# Media (large files)
+media/
+
+# Legacy paths
 res/raw
 res/JEZ_hirise*
