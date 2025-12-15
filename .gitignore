@@ -1,6 +1,10 @@
 # OS
 .DS_Store
 
+# Claude Code
+CLAUDE.md
+AGENTS.md
+
 # Python
 __pycache__/
 *.pyc
