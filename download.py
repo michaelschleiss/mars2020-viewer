@@ -226,7 +226,7 @@ DATASETS = {
     },
     # === MSL Curiosity - Orbital Maps ===
     "msl_orbital": {
-        "name": "MSL Gale merged ortho + DEM (27 GB)",
+        "name": "MSL Gale merged ortho + DEM",
         "files": [
             (
                 "https://asc-pds-services.s3.us-west-2.amazonaws.com/mosaic/MSL_Gale_Orthophoto_Mosaic_25cm_v3.tif",
@@ -546,7 +546,18 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
     # For small file lists (static files), get actual sizes; else estimate from first
     if len(files) <= 10:
         print("  Checking sizes...")
-        file_sizes = [get_file_size(url) for url, _ in files]
+        file_sizes = []
+        for url, filename in files:
+            size = get_file_size(url)
+            file_sizes.append(size)
+            if size >= 1_000_000_000:
+                print(f"    {filename}: {size / 1_000_000_000:.1f} GB")
+            elif size >= 1_000_000:
+                print(f"    {filename}: {size / 1_000_000:.0f} MB")
+            elif size > 0:
+                print(f"    {filename}: {size} bytes")
+            else:
+                print(f"    {filename}: unknown size (no Content-Length)")
         total_estimate = sum(file_sizes)
     else:
         first_url = files[0][0]

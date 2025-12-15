@@ -23,6 +23,8 @@ The primary TRN sensor — matched descent images to onboard CTX-derived map.
 | Camera model | CAHVORE (embedded in header) |
 | Pose | 6-DOF in MCMF frame (embedded in header) |
 
+**References:** Maki et al. (2020) "The Mars 2020 Engineering Cameras and Microphone" DOI: [10.1007/s11214-020-00765-9](https://doi.org/10.1007/s11214-020-00765-9) | Johnson et al. (2022) "Mars 2020 Lander Vision System Flight Performance" DOI: [10.2514/6.2022-1214](https://doi.org/10.2514/6.2022-1214)
+
 ### Products
 
 | Type | Pixels | Pose |
@@ -34,9 +36,11 @@ Image pixels identical — difference is pose accuracy only. FDR pose reconstruc
 
 **PDS:** `urn:nasa:pds:mars2020_edlcam_ops_calibrated`
 
-**Download:** `python tools/download_edl.py --camera lcam` → `data/m2020/lcam/`
+**Download:** `python3 download.py lcam` → `data/m2020/lcam/`
 
 **Details:** [LCAM_SEQUENCE.md](LCAM_SEQUENCE.md) — sensor specs, TRN processing, label fields, filename convention
+
+**References:** Maki et al. (2020) "The Mars 2020 Engineering Cameras and Microphone" DOI: [10.1007/s11214-020-00765-9](https://doi.org/10.1007/s11214-020-00765-9) | Johnson et al. (2022) "Mars 2020 Lander Vision System Flight Performance" DOI: [10.2514/6.2022-1214](https://doi.org/10.2514/6.2022-1214)
 
 ---
 
@@ -55,7 +59,7 @@ Continuous video from powered descent through touchdown.
 
 **PDS:** `urn:nasa:pds:mars2020_edlcam_ops_calibrated`
 
-**Download:** `python tools/download_edl.py --camera rdcam` → `data/m2020/rdcam/`
+**Download:** `python3 download.py rdcam` → `data/m2020/rdcam/`
 
 **Details:** [RDCAM_SEQUENCE.md](RDCAM_SEQUENCE.md) — sensor specs, products, pose recovery
 
@@ -106,6 +110,8 @@ Hazard basemap for Safe Target Selection — not used for landmark matching.
 
 **All files:** [USGS index](https://asc-pds-services.s3.us-west-2.amazonaws.com/mosaic/mars2020_trn/HiRISE/index.html)
 
+**References:** Fergason et al. (2020) LPSC, Kirk et al. (2020) [10.5194/isprs-archives-XLIII-B3-2020-1129-2020](https://doi.org/10.5194/isprs-archives-XLIII-B3-2020-1129-2020)
+
 ---
 
 ## 6. SPICE Kernels & Coordinate System
@@ -125,6 +131,8 @@ EDL trajectory and attitude reconstruction. LCAM products use `MCMF_FRAME` (Mars
 | `lsk/naif0012.tls` | Leap seconds |
 
 **Helper:** `tools/spice_fetch_mars2020_edl.py`
+
+**References:** Abilleira, F. et al. (2021). "Mars 2020 Perseverance trajectory reconstruction and performance from launch through landing", AAS 21-518, AAS/AIAA Astrodynamics Specialist Conference. [NTRS](https://ntrs.nasa.gov/citations/20220000775)
 
 **Details:** [COORDINATES.md](COORDINATES.md) — MCMF→equirectangular projection, vertical datum
 

@@ -1,5 +1,9 @@
 # MARDI Sensor Notes
 
+## References
+
+- Malin et al. (2017) "The Mars Science Laboratory Mast Cameras and Descent Imager" DOI: [10.1016/j.epsl.2016.12.038](https://doi.org/10.1016/j.epsl.2016.12.038) | PMC: [PMC5652233](https://pmc.ncbi.nlm.nih.gov/articles/PMC5652233/)
+
 ## Bayer Pattern
 
 Source: MSL MMM EDR/RDR Data Product SIS (`out/msl_mmm_docs/MSL_MMM_EDR_RDR_DPSIS.PDF`)

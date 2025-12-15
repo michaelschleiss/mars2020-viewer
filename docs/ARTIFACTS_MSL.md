@@ -53,8 +53,8 @@ These mosaics were produced as **EDL assessment tools** for MSL and are the most
 
 - Dataset ID seen in your local labels: `MSL-M-MARDI-4-RDR-IMG-V1.0`
 - Local example labels/images:
-  - `data/msl/labels/*.LBL` (detached PDS3 labels)
-  - `data/msl/images/*.IMG` (detached image payloads)
+  - `data/msl/rdr/*.LBL` (detached PDS3 labels)
+  - `data/msl/rdr/*.IMG` (detached image payloads)
   - Optional “official volume fetch” (EDR/RDR, EDL phase) via `tools/msl_mardi_fetch_edr_rdr.py` into `data/msl_mardi_volume0003/`
 
 Notes:
@@ -109,6 +109,15 @@ Directory: `https://planetarydata.jpl.nasa.gov/img/data/msl/MSLMRD_0001/DATA/RDR
 - `I01`: present across `CCCCC=00001..01504` (thumbnail companion; multiple RDR processing codes).
 - `C00`: present only for a **small subset** of frames in this directory (observed: `350, 354, 451, 461, 471, 481, 491, 501, 513, 525, 526, 532, 534, 543, 545, 1504`).
 
+**`MSLMRD_0002` (EDL-phase, large lossless subset)**  
+Index sources:
+- `https://planetarydata.jpl.nasa.gov/img/data/msl/MSLMRD_0002/INDEX/EDRINDEX.TAB`
+- `https://planetarydata.jpl.nasa.gov/img/data/msl/MSLMRD_0002/INDEX/RDRINDEX.TAB`
+
+For `MISSION_PHASE_NAME="ENTRY, DESCENT, AND LANDING"` and `INSTRUMENT_ID="MD"`:
+- EDR contains **432 frames total**: `C00=432` (`CCCCC` spans `00027..00600` with gaps).
+- RDR contains those same 432 frames for each of the 4 processing codes (`DRXX/DRCX/DRLX/DRCL`) → **1728 RDR products** total.
+
 **`MSLMRD_0003` (EDL-phase subset, lossless-focused)**  
 Index sources:
 - `https://planetarydata.jpl.nasa.gov/img/data/msl/MSLMRD_0003/INDEX/EDRINDEX.TAB`
@@ -118,7 +127,7 @@ For `MISSION_PHASE_NAME="ENTRY, DESCENT, AND LANDING"` and `INSTRUMENT_ID="MD"`:
 - EDR contains **192 frames total**: `C00=187` and `C01=5`.
 - RDR contains those same 192 frames for each of the 4 processing codes (`DRXX/DRCX/DRLX/DRCL`) → **768 RDR products** total.
 
-This is the root cause of the “~180 images” surprise: if you download only `*_C00_DRCL` from `MSLMRD_0003`, you get **187 frames**.
+This is the root cause of the “~180 images” surprise: if you download only `*_C00_DRCL` from `MSLMRD_0003`, you get **187 frames**. The more complete lossless coverage for the “descent” portion lives mostly in `MSLMRD_0002`, with additional frames filled in by `MSLMRD_0003` and a handful from `MSLMRD_0001`.
 
 ### Lossless Frame Coverage (From Local Inventory)
 
@@ -128,6 +137,10 @@ If you’ve fetched `data/msl_mardi_volume0003/rdr/*C00*DRCL*`, the `C00` frames
   `(215,215), (296,297), (313,317), (319,337), (339,349), (351,353), (355,359), (361,379), (381,399), (402,410), (412,420), (422,430), (432,440), (442,448), (601,660)`
 
 The remaining lossless frames in `MSLMRD_0003` are `C01` (5 frames): `350, 354, 513, 525, 526`.
+
+Across `MSLMRD_0001`+`MSLMRD_0002`+`MSLMRD_0003`, the **union** of lossless MARDI frames for Sol 0000 covers:
+- `CCCCC=00027..00660` (no gaps), plus `CCCCC=01504`.
+- Within the common “descent imagery” subset `CCCCC=00001..00626`, **600 frames** are available losslessly (`00027..00626`); `00001..00026` do not appear as lossless products in the volume index tables.
 
 ## Local Conventions (This Repo)
 
@@ -155,4 +168,4 @@ Supporting kernels commonly required:
 Local helper scripts in this repo:
 - `tools/usgs_fetch_msl_labels.py` downloads the USGS PDS3/ISIS3 labels into `out/usgs_msl_labels/`.
 - `tools/spice_fetch_msl_edl.py` downloads a minimal MSL EDL kernel set and writes a meta-kernel for `spiceypy`.
-- `tools/msl_mardi_trajectory.py` uses those kernels + `data/msl/labels/*.LBL` to write a time-synced trajectory CSV.
+- `tools/msl_mardi_trajectory.py` uses those kernels + `data/msl/rdr/*.LBL` to write a time-synced trajectory CSV.
