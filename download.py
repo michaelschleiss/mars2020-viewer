@@ -12,131 +12,14 @@ Usage:
 
 import argparse
 import re
-import threading
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-try:
-    from tqdm import tqdm  # type: ignore
-except Exception:  # pragma: no cover
-    tqdm = None
-
-try:
-    import urllib3
-except Exception:  # pragma: no cover
-    urllib3 = None
-
+from tqdm import tqdm
 
 _USER_AGENT = "mars2020-viewer/1.0"
-
-
-class ByteProgress:
-    """Thread-safe byte counter for live download rate display."""
-
-    def __init__(self, pbar, total_files: int, est_total_bytes: int = 0):
-        self.total_bytes = 0
-        self.session_bytes = 0
-        self.file_count = 0
-        self.total_files = total_files
-        self.est_total_bytes = est_total_bytes  # from HEAD request(s)
-        self.pbar = pbar
-        self.start_time = time.perf_counter()
-        self._lock = threading.Lock()
-        self._last_update = 0.0
-
-    def add_bytes(self, chunk_size: int) -> None:
-        """Update progress incrementally as bytes are received."""
-        with self._lock:
-            self.total_bytes += chunk_size
-            self.session_bytes += chunk_size
-
-            # Throttle updates to avoid excessive overhead
-            now = time.perf_counter()
-            if now - self._last_update < 0.1:
-                return
-            self._last_update = now
-
-            self._update_display()
-
-    def add_existing_bytes(self, byte_count: int) -> None:
-        """Count bytes already present on disk (skipped files / resume partials)."""
-        if byte_count <= 0:
-            return
-        with self._lock:
-            self.total_bytes += byte_count
-            self._update_display()
-
-    def file_done(self) -> None:
-        """Mark a file as complete (for file count tracking)."""
-        with self._lock:
-            self.file_count += 1
-            self._update_display()
-
-    def _update_display(self) -> None:
-        """Update the progress bar description."""
-        elapsed = time.perf_counter() - self.start_time
-        mb = self.total_bytes / 1_000_000
-        rate = (self.session_bytes / 1_000_000) / elapsed if elapsed > 0 else 0
-
-        # Use known total if available, else estimate from average
-        if self.est_total_bytes > 0:
-            est_total_mb = self.est_total_bytes / 1_000_000
-        elif self.file_count > 0:
-            avg_size = self.total_bytes / self.file_count
-            est_total_mb = avg_size * self.total_files / 1_000_000
-        else:
-            est_total_mb = mb  # fallback
-
-        remaining_mb = max(0, est_total_mb - mb)
-        eta_sec = remaining_mb / rate if rate > 0 else 0
-        eta_str = f"{int(eta_sec // 60)}:{int(eta_sec % 60):02d}"
-
-        # Format elapsed/ETA
-        elapsed_str = f"{int(elapsed // 60)}:{int(elapsed % 60):02d}"
-        time_str = f"{elapsed_str}/{eta_str}"
-
-        if est_total_mb >= 1000:
-            self.pbar.set_description_str(
-                f"⏱ {time_str} | ↓ {mb / 1000:.1f}/{est_total_mb / 1000:.1f}GB @ {rate:.1f}MB/s"
-            )
-        else:
-            self.pbar.set_description_str(
-                f"⏱ {time_str} | ↓ {mb:.0f}/{est_total_mb:.0f}MB @ {rate:.1f}MB/s"
-            )
-
-
-class _NoTqdmPbar:
-    """Minimal tqdm-compatible progress bar fallback (no dependencies)."""
-
-    def __init__(self, total: int):
-        self.total = total
-        self.n = 0
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def set_description_str(self, _desc: str) -> None:
-        # Intentionally minimal; avoid noisy logs for large datasets.
-        return
-
-    def update(self, n: int) -> None:
-        self.n += n
-
-
-def _progress_bar(*, total: int, desc: str):
-    if tqdm is None:
-        return _NoTqdmPbar(total)
-    return tqdm(
-        total=total,
-        desc=desc,
-        unit="file",
-        bar_format="Downloading: [{bar:25}] {n}/{total} | {desc}",
-    )
 
 
 # =============================================================================
@@ -337,23 +220,6 @@ def _request(url: str, *, method: str = "GET", headers: dict[str, str] | None = 
     return urllib.request.Request(url, method=method, headers=req_headers)
 
 
-def _urllib3_pool() -> "urllib3.PoolManager":
-    if urllib3 is None:  # pragma: no cover
-        raise RuntimeError("urllib3 is not available")
-    timeout = urllib3.Timeout(connect=30.0, read=120.0)
-    return urllib3.PoolManager(headers={"User-Agent": _USER_AGENT}, timeout=timeout)
-
-
-_URLLIB3_POOL: "urllib3.PoolManager | None" = None
-
-
-def _get_urllib3_pool() -> "urllib3.PoolManager":
-    global _URLLIB3_POOL
-    if _URLLIB3_POOL is None:
-        _URLLIB3_POOL = _urllib3_pool()
-    return _URLLIB3_POOL
-
-
 def fetch_directory(url: str, pattern: str) -> list[str]:
     """Fetch directory listing and return files matching pattern."""
     with urllib.request.urlopen(_request(url), timeout=30) as resp:
@@ -381,45 +247,8 @@ def fetch_inventory(url: str, filter_fn=None) -> list[str]:
     return product_ids
 
 
-class _HttpResponse:
-    def __init__(self, *, status: int, headers, reader, releaser):
-        self.status = status
-        self.headers = headers
-        self._reader = reader
-        self._releaser = releaser
-
-    def read(self, n: int) -> bytes:
-        return self._reader(n)
-
-    def close(self) -> None:
-        self._releaser()
-
-
-def _http_open(url: str, *, method: str = "GET", headers: dict[str, str] | None = None, timeout_s: float = 120.0) -> _HttpResponse:
-    """Open an HTTP request via urllib3 (if available) else urllib.request."""
-    if urllib3 is not None:
-        pool = _get_urllib3_pool()
-        resp = pool.request(method, url, headers=headers, preload_content=False)
-        return _HttpResponse(
-            status=int(resp.status),
-            headers=resp.headers,
-            reader=resp.read,
-            releaser=resp.release_conn,
-        )
-
-    req = _request(url, method=method, headers=headers or {})
-    resp = urllib.request.urlopen(req, timeout=timeout_s)
-    status = getattr(resp, "status", resp.getcode())
-    return _HttpResponse(
-        status=int(status),
-        headers=resp.headers,
-        reader=resp.read,
-        releaser=resp.close,
-    )
-
-
 def download_file(
-    url: str, dest: Path, byte_progress: ByteProgress | None = None, retries: int = 3
+    url: str, dest: Path, pbar: "tqdm | None" = None, retries: int = 3
 ) -> bool:
     """Download a single file. Returns True if downloaded, False if skipped."""
     if dest.exists() and dest.stat().st_size > 0:
@@ -427,59 +256,33 @@ def download_file(
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_suffix(dest.suffix + ".partial")
-    preexisting_partial_bytes = partial.stat().st_size if partial.exists() else 0
-    counted_preexisting = False
+    partial.unlink(missing_ok=True)
 
     for attempt in range(retries):
         try:
-            resume_from = partial.stat().st_size if partial.exists() else 0
-            range_headers = {"Range": f"bytes={resume_from}-"} if resume_from > 0 else None
-
-            resp = _http_open(url, headers=range_headers, timeout_s=120.0)
-            try:
-                if resp.status == 416 and resume_from > 0:
-                    partial.unlink(missing_ok=True)
-                    preexisting_partial_bytes = 0
-                    continue
-                if resp.status not in (200, 206):
-                    raise RuntimeError(f"HTTP {resp.status}")
-
-                if (
-                    resp.status == 206
-                    and resume_from > 0
-                    and preexisting_partial_bytes > 0
-                    and not counted_preexisting
-                    and byte_progress
-                ):
-                    byte_progress.add_existing_bytes(preexisting_partial_bytes)
-                    counted_preexisting = True
-                elif resp.status == 200 and resume_from > 0:
-                    preexisting_partial_bytes = 0
-                    counted_preexisting = True
-
-                mode = "ab" if resp.status == 206 and resume_from > 0 else "wb"
-                with partial.open(mode) as f:
+            req = _request(url)
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                status = int(getattr(resp, "status", resp.getcode()))
+                if status != 200:
+                    raise RuntimeError(f"HTTP {status}")
+                with partial.open("wb") as f:
                     while True:
                         chunk = resp.read(1024 * 1024)
                         if not chunk:
                             break
                         f.write(chunk)
-                        if byte_progress:
-                            byte_progress.add_bytes(len(chunk))
-            finally:
-                resp.close()
+                        if pbar:
+                            pbar.update(len(chunk))
 
             partial.rename(dest)
             return True
         except urllib.error.HTTPError as e:
-            if e.code == 416 and partial.exists():
-                partial.unlink(missing_ok=True)
-                preexisting_partial_bytes = 0
-                continue
+            partial.unlink(missing_ok=True)
             if e.code in {400, 401, 403, 404}:
                 print(f"  Error: HTTP {e.code} for {url}")
                 return False
         except Exception as e:
+            partial.unlink(missing_ok=True)
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)  # 1s, 2s, 4s...
             else:
@@ -489,11 +292,9 @@ def download_file(
 
 def get_file_size(url: str) -> int:
     """Get file size via HEAD request."""
-    resp = _http_open(url, method="HEAD", timeout_s=10.0)
-    try:
-        return int(resp.headers.get("Content-Length") or 0)
-    finally:
-        resp.close()
+    req = _request(url, method="HEAD")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return int(resp.headers.get("Content-Length", 0))
 
 
 def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
@@ -574,29 +375,18 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
 
     downloaded = 0
     skipped = 0
-
-    # Initial description with estimate
-    est_total_mb = total_estimate / 1_000_000
-    if est_total_mb >= 1000:
-        init_desc = f"⏱ 0:00/--:-- | ↓ 0/{est_total_mb / 1000:.1f}GB @ --MB/s"
-    else:
-        init_desc = f"⏱ 0:00/--:-- | ↓ 0/{est_total_mb:.0f}MB @ --MB/s"
-
-    with _progress_bar(total=len(files), desc=init_desc) as pbar:
-        byte_progress = ByteProgress(pbar, len(files), total_estimate)
-
-        for url, filename in files:
+    total = total_estimate if total_estimate > 0 else None
+    with tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1000, desc="Downloading") as pbar:
+        for i, (url, filename) in enumerate(files, 1):
             dest = output_dir / filename
 
-            if download_file(url, dest, byte_progress):
+            if download_file(url, dest, pbar):
                 downloaded += 1
             else:
                 skipped += 1
-                # For skipped files, count their size as already done
                 if dest.exists():
-                    byte_progress.add_existing_bytes(dest.stat().st_size)
-            byte_progress.file_done()
-            pbar.update(1)
+                    pbar.update(dest.stat().st_size)
+            pbar.set_postfix_str(f"{i}/{len(files)} files", refresh=False)
 
     print(f"  Done: {downloaded} downloaded, {skipped} skipped")
 
