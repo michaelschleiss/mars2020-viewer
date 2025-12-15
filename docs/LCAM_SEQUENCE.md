@@ -259,12 +259,3 @@ Example: `ELM_0000_0666952774_000FDR_N0000001LVS_04000_0000LUJ01.IMG`
 | Jezero areoid radius | 3,394,507.076 m | Camera SIS |
 | UTC format | `%Y-%m-%dT%H:%M:%S.%f` | PDS3 |
 
----
-
-## 13. Frame-to-Stage Mapping (Detailed)
-
-See **Section 4** for the frame-to-stage summary table.
-
-For detailed mapping with verification methodology:
-- **`LCAM_FRAME_TO_STAGE_MAPPING.md`** — Complete frame assignments, conversion formulas, Python code
-- **`LCAM_FRAME_MAPPING_REFERENCES.md`** — Citations, timeline correlation, verification methodology
