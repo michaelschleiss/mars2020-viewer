@@ -34,6 +34,7 @@ class ByteProgress:
 
     def __init__(self, pbar, total_files: int, est_total_bytes: int = 0):
         self.total_bytes = 0
+        self.session_bytes = 0
         self.file_count = 0
         self.total_files = total_files
         self.est_total_bytes = est_total_bytes  # from HEAD request(s)
@@ -46,6 +47,7 @@ class ByteProgress:
         """Update progress incrementally as bytes are received."""
         with self._lock:
             self.total_bytes += chunk_size
+            self.session_bytes += chunk_size
 
             # Throttle updates to avoid excessive overhead
             now = time.perf_counter()
@@ -53,6 +55,14 @@ class ByteProgress:
                 return
             self._last_update = now
 
+            self._update_display()
+
+    def add_existing_bytes(self, byte_count: int) -> None:
+        """Count bytes already present on disk (skipped files / resume partials)."""
+        if byte_count <= 0:
+            return
+        with self._lock:
+            self.total_bytes += byte_count
             self._update_display()
 
     def file_done(self) -> None:
@@ -65,7 +75,7 @@ class ByteProgress:
         """Update the progress bar description."""
         elapsed = time.perf_counter() - self.start_time
         mb = self.total_bytes / 1_000_000
-        rate = mb / elapsed if elapsed > 0 else 0
+        rate = (self.session_bytes / 1_000_000) / elapsed if elapsed > 0 else 0
 
         # Use known total if available, else estimate from average
         if self.est_total_bytes > 0:
@@ -142,26 +152,20 @@ _LOSSLESS_FULL = lambda pid: "_n" in pid and "luj" in pid
 DATASETS = {
     # === MSL Curiosity ===
     "mardi": {
-        "name": "MARDI - Mars Descent Imager (1504 lossy)",
-        "directory": f"{_MSL_BASE}/MSLMRD_0001/DATA/EDR/SURFACE/0000/",
-        "output": "data/msl/mardi",
-        "pattern": r"0000MD\d+E01_XXXX\.DAT",  # EDR lossy JPEG
-    },
-    "mardi_rdr": {
         "name": "MARDI RDR - Sol 0000 (E01_DRCL label+image pairs)",
         "directory": f"{_MSL_BASE}/MSLMRD_0001/DATA/RDR/SURFACE/0000/",
         "output": "data/msl/rdr",
         "pattern": r"0000MD\d+E01_DRCL\.(LBL|IMG)",
     },
     "mardi_lossless": {
-        "name": "MARDI Lossless - 635 frames across 3 volumes",
+        "name": "MARDI RDR lossless subset - Sol 0000 (C00/C01_DRCL pairs across volumes)",
         "directories": [
-            f"{_MSL_BASE}/MSLMRD_0001/DATA/EDR/SURFACE/0000/",
-            f"{_MSL_BASE}/MSLMRD_0002/DATA/EDR/SURFACE/0000/",
-            f"{_MSL_BASE}/MSLMRD_0003/DATA/EDR/SURFACE/0000/",
+            f"{_MSL_BASE}/MSLMRD_0001/DATA/RDR/SURFACE/0000/",
+            f"{_MSL_BASE}/MSLMRD_0002/DATA/RDR/SURFACE/0000/",
+            f"{_MSL_BASE}/MSLMRD_0003/DATA/RDR/SURFACE/0000/",
         ],
-        "output": "data/msl/mardi_lossless",
-        "pattern": r"0000MD\d+C0[01]_XXXX\.DAT",  # EDR lossless (C00/C01)
+        "output": "data/msl/rdr",
+        "pattern": r"0000MD\d+C0[01]_DRCL\.(LBL|IMG)",
     },
     # === Mars 2020 Perseverance ===
     "lcam": {
@@ -221,17 +225,6 @@ DATASETS = {
         "filter": _LOSSLESS_FULL,
     },
     # === MSL Curiosity - Orbital Maps ===
-    # Citation: Grindrod & Davis (2018) https://doi.org/10.6084/m9.figshare.6584984
-    "msl_ctx": {
-        "name": "MSL Gale CTX stereo DTMs + orthos (1.1 GB)",
-        "files": [
-            ("https://ndownloader.figshare.com/files/12096770", "DTMs.zip"),
-            ("https://ndownloader.figshare.com/files/12096776", "FOMs.zip"),
-            ("https://ndownloader.figshare.com/files/12096839", "orthos.zip"),
-            ("https://ndownloader.figshare.com/files/12096842", "Readme.pdf"),
-        ],
-        "output": "data/msl/ctx",
-    },
     "msl_orbital": {
         "name": "MSL Gale merged ortho + DEM (27 GB)",
         "files": [
@@ -401,6 +394,8 @@ def download_file(
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_suffix(dest.suffix + ".partial")
+    preexisting_partial_bytes = partial.stat().st_size if partial.exists() else 0
+    counted_preexisting = False
 
     for attempt in range(retries):
         try:
@@ -413,9 +408,23 @@ def download_file(
                 try:
                     if resp.status == 416 and resume_from > 0:
                         partial.unlink(missing_ok=True)
+                        preexisting_partial_bytes = 0
                         continue
                     if resp.status not in (200, 206):
                         raise RuntimeError(f"HTTP {resp.status}")
+
+                    if (
+                        resp.status == 206
+                        and resume_from > 0
+                        and preexisting_partial_bytes > 0
+                        and not counted_preexisting
+                        and byte_progress
+                    ):
+                        byte_progress.add_existing_bytes(preexisting_partial_bytes)
+                        counted_preexisting = True
+                    elif resp.status == 200 and resume_from > 0:
+                        preexisting_partial_bytes = 0
+                        counted_preexisting = True
 
                     mode = "ab" if resp.status == 206 and resume_from > 0 else "wb"
                     with partial.open(mode) as f:
@@ -432,6 +441,19 @@ def download_file(
                 req = _request(url, headers=headers or {})
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     status = getattr(resp, "status", resp.getcode())
+                    if (
+                        status == 206
+                        and resume_from > 0
+                        and preexisting_partial_bytes > 0
+                        and not counted_preexisting
+                        and byte_progress
+                    ):
+                        byte_progress.add_existing_bytes(preexisting_partial_bytes)
+                        counted_preexisting = True
+                    elif status == 200 and resume_from > 0:
+                        preexisting_partial_bytes = 0
+                        counted_preexisting = True
+
                     mode = "ab" if status == 206 and resume_from > 0 else "wb"
                     with partial.open(mode) as f:
                         while True:
@@ -447,6 +469,7 @@ def download_file(
         except urllib.error.HTTPError as e:
             if e.code == 416 and partial.exists():
                 partial.unlink(missing_ok=True)
+                preexisting_partial_bytes = 0
                 continue
             if e.code in {400, 401, 403, 404}:
                 print(f"  Error: HTTP {e.code} for {url}")
@@ -460,30 +483,12 @@ def download_file(
 
 
 def get_file_size(url: str) -> int:
-    """Get file size via HEAD request, following redirects."""
+    """Get file size via HEAD request."""
     if urllib3 is not None:
         pool = _get_urllib3_pool()
-        resp = pool.request("HEAD", url, preload_content=False, redirect=False)
+        resp = pool.request("HEAD", url, preload_content=False)
         try:
-            size = int(resp.headers.get("Content-Length") or 0)
-            # Handle redirects (e.g., Figshare -> S3 signed URLs)
-            if size == 0 and resp.status in (301, 302, 303, 307, 308):
-                redirect_url = resp.headers.get("Location")
-                if redirect_url:
-                    # S3 signed URLs don't return Content-Length on HEAD,
-                    # but do return Content-Range on range requests
-                    resp2 = pool.request(
-                        "GET", redirect_url, preload_content=False,
-                        headers={"Range": "bytes=0-0"}
-                    )
-                    try:
-                        # Parse "bytes 0-0/12345" to get total size
-                        cr = resp2.headers.get("Content-Range", "")
-                        if "/" in cr:
-                            size = int(cr.split("/")[-1])
-                    finally:
-                        resp2.release_conn()
-            return size
+            return int(resp.headers.get("Content-Length") or 0)
         finally:
             resp.release_conn()
     req = _request(url, method="HEAD")
@@ -583,7 +588,7 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
                 skipped += 1
                 # For skipped files, count their size as already done
                 if dest.exists():
-                    byte_progress.add_bytes(dest.stat().st_size)
+                    byte_progress.add_existing_bytes(dest.stat().st_size)
             byte_progress.file_done()
             pbar.update(1)
 
