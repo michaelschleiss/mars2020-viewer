@@ -43,16 +43,21 @@ class ByteProgress:
             est_total_mb = avg_size * self.total_files / 1_000_000
             remaining_mb = est_total_mb - mb
             eta_sec = remaining_mb / rate if rate > 0 else 0
-            eta_str = f"{int(eta_sec//60)}:{int(eta_sec%60):02d}"
+            eta_str = f"{int(eta_sec // 60)}:{int(eta_sec % 60):02d}"
 
             # Format elapsed/ETA
-            elapsed_str = f"{int(elapsed//60)}:{int(elapsed%60):02d}"
+            elapsed_str = f"{int(elapsed // 60)}:{int(elapsed % 60):02d}"
             time_str = f"{elapsed_str}/{eta_str}"
 
             if est_total_mb >= 1000:
-                self.pbar.set_description_str(f"⏱ {time_str} | ↓ {mb/1000:.1f}/{est_total_mb/1000:.1f}GB @ {rate:.1f}MB/s")
+                self.pbar.set_description_str(
+                    f"⏱ {time_str} | ↓ {mb / 1000:.1f}/{est_total_mb / 1000:.1f}GB @ {rate:.1f}MB/s"
+                )
             else:
-                self.pbar.set_description_str(f"⏱ {time_str} | ↓ {mb:.0f}/{est_total_mb:.0f}MB @ {rate:.1f}MB/s")
+                self.pbar.set_description_str(
+                    f"⏱ {time_str} | ↓ {mb:.0f}/{est_total_mb:.0f}MB @ {rate:.1f}MB/s"
+                )
+
 
 # Dataset configurations
 #
@@ -77,14 +82,24 @@ _LOSSLESS_FULL = lambda pid: "_n" in pid and "luj" in pid
 DATASETS = {
     # === MSL Curiosity ===
     "mardi": {
-        "name": "MARDI - Mars Descent Imager (1504 images, ~165 MB)",
+        "name": "MARDI - Mars Descent Imager (1504 lossy)",
         "directory": f"{_MSL_BASE}/MSLMRD_0001/DATA/EDR/SURFACE/0000/",
         "output": "data/msl/mardi",
-        "pattern": r"0000MD\d+E01_XXXX\.DAT",  # EDR image data files only
+        "pattern": r"0000MD\d+E01_XXXX\.DAT",  # EDR lossy JPEG
+    },
+    "mardi_lossless": {
+        "name": "MARDI Lossless - 635 frames across 3 volumes",
+        "directories": [
+            f"{_MSL_BASE}/MSLMRD_0001/DATA/EDR/SURFACE/0000/",
+            f"{_MSL_BASE}/MSLMRD_0002/DATA/EDR/SURFACE/0000/",
+            f"{_MSL_BASE}/MSLMRD_0003/DATA/EDR/SURFACE/0000/",
+        ],
+        "output": "data/msl/mardi_lossless",
+        "pattern": r"0000MD\d+C0[01]_XXXX\.DAT",  # EDR lossless (C00/C01)
     },
     # === Mars 2020 Perseverance ===
     "lcam": {
-        "name": "LCAM - Lander Vision System (87 images, ~91 MB)",
+        "name": "LCAM - Lander Vision System (87 images)",
         "inventory": f"{_M2020_BASE}/data_sol0_lcam/collection_data_sol0_lcam_inventory.csv",
         "base": f"{_M2020_BASE}/data_sol0_lcam/sol/00000/ids/fdr/edl/",
         "output": "data/m2020/lcam",
@@ -92,7 +107,7 @@ DATASETS = {
         "filter": None,
     },
     "rdcam": {
-        "name": "RDCAM - Rover Downlook (7141 lossless full-frames, ~27 GB)",
+        "name": "RDCAM - Rover Downlook (7141 lossless full-frames)",
         "inventory": f"{_M2020_BASE}/data_sol0_rdc/collection_data_sol0_rdc_inventory.csv",
         "base": f"{_M2020_BASE}/data_sol0_rdc/sol/00000/ids/fdr/edl/",
         "output": "data/m2020/rdcam",
@@ -169,7 +184,9 @@ def fetch_inventory(url: str, filter_fn=None) -> list[str]:
     return product_ids
 
 
-def download_file(url: str, dest: Path, byte_progress: ByteProgress | None = None) -> bool:
+def download_file(
+    url: str, dest: Path, byte_progress: ByteProgress | None = None
+) -> bool:
     """Download a single file. Returns True if downloaded, False if skipped.
 
     Uses .partial suffix during download to prevent corrupt files from
@@ -215,13 +232,28 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
         product_ids = fetch_inventory(config["inventory"], config.get("filter"))
         base_url = config["base"]
         suffix = config["suffix"]
-        files = [(base_url + pid.upper() + suffix, pid.upper() + suffix) for pid in product_ids]
+        files = [
+            (base_url + pid.upper() + suffix, pid.upper() + suffix)
+            for pid in product_ids
+        ]
     elif "directory" in config:
-        # MSL style: directory listing + pattern
+        # MSL style: single directory listing + pattern
         print("  Fetching directory listing...")
         filenames = fetch_directory(config["directory"], config["pattern"])
         base_url = config["directory"]
         files = [(base_url + fn, fn) for fn in filenames]
+    elif "directories" in config:
+        # MSL style: multiple directories (e.g., across PDS volumes)
+        files = []
+        seen = set()
+        for i, dir_url in enumerate(config["directories"], 1):
+            print(f"  Fetching directory {i}/{len(config['directories'])}...")
+            filenames = fetch_directory(dir_url, config["pattern"])
+            for fn in filenames:
+                if fn not in seen:
+                    seen.add(fn)
+                    files.append((dir_url + fn, fn))
+        files.sort(key=lambda x: x[1])  # Sort by filename
     else:
         print("  Error: unknown dataset config")
         return
@@ -236,9 +268,13 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
     sample_size = get_file_size(first_url)
     total_estimate = sample_size * len(files)
     if total_estimate >= 1e9:
-        print(f"  Estimated size: {total_estimate/1e9:.1f} GB ({sample_size/1e6:.2f} MB × {len(files)})")
+        print(
+            f"  Estimated size: {total_estimate / 1e9:.1f} GB ({sample_size / 1e6:.2f} MB × {len(files)})"
+        )
     else:
-        print(f"  Estimated size: {total_estimate/1e6:.0f} MB ({sample_size/1e6:.2f} MB × {len(files)})")
+        print(
+            f"  Estimated size: {total_estimate / 1e6:.0f} MB ({sample_size / 1e6:.2f} MB × {len(files)})"
+        )
 
     if dry_run:
         return
@@ -249,7 +285,7 @@ def download_dataset(name: str, config: dict, dry_run: bool = False) -> None:
     # Initial description with estimate
     est_total_mb = sample_size * len(files) / 1_000_000
     if est_total_mb >= 1000:
-        init_desc = f"⏱ 0:00/--:-- | ↓ 0/{est_total_mb/1000:.1f}GB @ --MB/s"
+        init_desc = f"⏱ 0:00/--:-- | ↓ 0/{est_total_mb / 1000:.1f}GB @ --MB/s"
     else:
         init_desc = f"⏱ 0:00/--:-- | ↓ 0/{est_total_mb:.0f}MB @ --MB/s"
 
@@ -283,7 +319,8 @@ def main():
         help="Dataset to download (default: all)",
     )
     parser.add_argument(
-        "--dry-run", "-n",
+        "--dry-run",
+        "-n",
         action="store_true",
         help="Show what would be downloaded without downloading",
     )
