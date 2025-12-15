@@ -1,0 +1,20 @@
+[workspace]
+authors = ["michaelschleiss <michaelschleiss@gmx.de>"]
+channels = ["conda-forge"]
+name = "mars2020-viewer"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = ">=3.12,<3.13"
+pdr = ">=1.4.0,<2"
+rasterio = ">=1.4.4,<2"
+numpy = ">=2.3.5,<3"
+pip = ">=24,<26"
+setuptools = ">=70"
+wheel = ">=0.43"
+opencv = ">=4.12.0,<5"
+tqdm = ">=4.67.1,<5"
+spiceypy = ">=6.0.0,<7"
