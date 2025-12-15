@@ -115,7 +115,7 @@ DATASETS = {
     "mardi": {
         "name": "MARDI RDR - Sol 0000 (E01_DRCL label+image pairs)",
         "directory": f"{_MSL_BASE}/MSLMRD_0001/DATA/RDR/SURFACE/0000/",
-        "output": "data/msl/rdr",
+        "output": "data/msl/mardi",
         "pattern": r"0000MD\d+E01_DRCL\.(?:LBL|IMG)",
     },
     "mardi_lossless": {
@@ -125,7 +125,7 @@ DATASETS = {
             f"{_MSL_BASE}/MSLMRD_0002/DATA/RDR/SURFACE/0000/",
             f"{_MSL_BASE}/MSLMRD_0003/DATA/RDR/SURFACE/0000/",
         ],
-        "output": "data/msl/rdr",
+        "output": "data/msl/mardi_lossless",
         "pattern": r"0000MD\d+C0[01]_DRCL\.(?:LBL|IMG)",
     },
     **dict(_M2020_CAMS),
