@@ -147,6 +147,12 @@ DATASETS = {
         "output": "data/msl/mardi",
         "pattern": r"0000MD\d+E01_XXXX\.DAT",  # EDR lossy JPEG
     },
+    "mardi_rdr": {
+        "name": "MARDI RDR - Sol 0000 (E01_DRCL label+image pairs)",
+        "directory": f"{_MSL_BASE}/MSLMRD_0001/DATA/RDR/SURFACE/0000/",
+        "output": "data/msl/rdr",
+        "pattern": r"0000MD\d+E01_DRCL\.(LBL|IMG)",
+    },
     "mardi_lossless": {
         "name": "MARDI Lossless - 635 frames across 3 volumes",
         "directories": [
@@ -215,8 +221,19 @@ DATASETS = {
         "filter": _LOSSLESS_FULL,
     },
     # === MSL Curiosity - Orbital Maps ===
+    # Citation: Grindrod & Davis (2018) https://doi.org/10.6084/m9.figshare.6584984
+    "msl_ctx": {
+        "name": "MSL Gale CTX stereo DTMs + orthos (1.1 GB)",
+        "files": [
+            ("https://ndownloader.figshare.com/files/12096770", "DTMs.zip"),
+            ("https://ndownloader.figshare.com/files/12096776", "FOMs.zip"),
+            ("https://ndownloader.figshare.com/files/12096839", "orthos.zip"),
+            ("https://ndownloader.figshare.com/files/12096842", "Readme.pdf"),
+        ],
+        "output": "data/msl/ctx",
+    },
     "msl_orbital": {
-        "name": "MSL Gale Crater ortho + DEM",
+        "name": "MSL Gale merged ortho + DEM (27 GB)",
         "files": [
             (
                 "https://asc-pds-services.s3.us-west-2.amazonaws.com/mosaic/MSL_Gale_Orthophoto_Mosaic_25cm_v3.tif",
@@ -443,12 +460,30 @@ def download_file(
 
 
 def get_file_size(url: str) -> int:
-    """Get file size via HEAD request."""
+    """Get file size via HEAD request, following redirects."""
     if urllib3 is not None:
         pool = _get_urllib3_pool()
-        resp = pool.request("HEAD", url, preload_content=False)
+        resp = pool.request("HEAD", url, preload_content=False, redirect=False)
         try:
-            return int(resp.headers.get("Content-Length") or 0)
+            size = int(resp.headers.get("Content-Length") or 0)
+            # Handle redirects (e.g., Figshare -> S3 signed URLs)
+            if size == 0 and resp.status in (301, 302, 303, 307, 308):
+                redirect_url = resp.headers.get("Location")
+                if redirect_url:
+                    # S3 signed URLs don't return Content-Length on HEAD,
+                    # but do return Content-Range on range requests
+                    resp2 = pool.request(
+                        "GET", redirect_url, preload_content=False,
+                        headers={"Range": "bytes=0-0"}
+                    )
+                    try:
+                        # Parse "bytes 0-0/12345" to get total size
+                        cr = resp2.headers.get("Content-Range", "")
+                        if "/" in cr:
+                            size = int(cr.split("/")[-1])
+                    finally:
+                        resp2.release_conn()
+            return size
         finally:
             resp.release_conn()
     req = _request(url, method="HEAD")
