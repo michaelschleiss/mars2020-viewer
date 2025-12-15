@@ -15,57 +15,28 @@
 
 The primary TRN sensor — matched descent images to onboard CTX-derived map.
 
-### Sensor
-
 | Parameter | Value |
 |-----------|-------|
-| Resolution | 1024 × 1024 pixels |
+| Frames | 87 |
+| Resolution | 1024 × 1024, 8-bit grayscale |
 | FOV | 90° × 90° |
-| Pixel scale | 1.67 mrad/pixel |
-| Focal length | 5.8 mm, f/2.7 |
-| Detector | On Semi Python 5000 (2×2 binned) |
-| Bit depth | 8-bit grayscale |
+| Camera model | CAHVORE (embedded in header) |
+| Pose | 6-DOF in MCMF frame (embedded in header) |
 
-**Reference:** Maki et al. (2020), Table 5 — `literature/Maki2020_Mars2020_Engineering_Cameras.pdf`
+### Products
 
-### EDL Sequence
+| Type | Pixels | Pose |
+|------|--------|------|
+| EDR | Lossless | Onboard estimate |
+| **FDR** | Lossless | Reconstructed (recommended) |
 
-| Parameter | Value |
-|-----------|-------|
-| Frames | 87 calibrated images |
-| Altitude range | ~4 km to backshell separation |
-| Camera model | CAHVORE (embedded in each .IMG header) |
-| Pose | `ORIGIN_OFFSET_VECTOR` + `ORIGIN_ROTATION_QUATERNION` in MCMF frame |
+Image pixels identical — difference is pose accuracy only. FDR pose reconstructed post-landing from DIMU + known landing site.
 
-**Source:** `urn:nasa:pds:mars2020_edlcam_ops_calibrated`
-- https://pds-imaging.jpl.nasa.gov/data/mars2020/mars2020_edlcam_ops_calibrated/
+**PDS:** https://pds-imaging.jpl.nasa.gov/data/mars2020/mars2020_edlcam_ops_calibrated/
 
-### Filename Convention
+**Download:** `python tools/download_edl.py --camera lcam` → `data/m2020/lcam/`
 
-Example: `ELM_0000_0666952774_000FDR_N0000001LVS_04000_0000LUJ01.IMG`
-
-| Position | Field | Example | Description |
-|----------|-------|---------|-------------|
-| 01–02 | Instrument | `EL` | EDL Lander Vision System (LCAM) |
-| 03 | Color | `M` | Monochrome/Panchromatic |
-| 04 | Special | `_` | Nominal processing |
-| 05–08 | Sol | `0000` | Sol number (0 for EDL) |
-| 09 | Venue | `_` | Flight |
-| 10–19 | SCLK | `0666952774` | Spacecraft clock (integer seconds only) |
-| 20 | — | `_` | Separator |
-| 21–23 | Milliseconds | `000` | SCLK fractional part |
-| 24–26 | Product type | `FDR` | Flight Data Record (calibrated) |
-| 27 | Geometry | `_` | Raw (non-linearized) |
-| 28 | Thumbnail | `N` | Non-thumbnail |
-| 29–31 | Site/Set | `000` | Always 000 for LCAM |
-| 32–35 | Frame | `0001` | Frame number (1–87) |
-| 36–38 | Camera | `LVS` | Lander Vision System |
-| 39 | — | `_` | Separator |
-| 40–44 | Sequence | `04000` | Sequence ID |
-| 45 | — | `_` | Separator |
-| 46–54 | Product ID | `0000LUJ01` | Unique product identifier |
-
-**Reference:** Mars2020_Camera_SIS.pdf, Section 18 "FILE NAMING STANDARDS", Table 18-1 (pages 198–210)
+**Details:** [LCAM_SEQUENCE.md](LCAM_SEQUENCE.md) — sensor specs, TRN processing, label fields, filename convention
 
 ---
 
