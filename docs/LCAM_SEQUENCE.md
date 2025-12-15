@@ -4,7 +4,25 @@ Consolidated from literature, local file analysis, Camera SIS, and codebase tool
 
 ---
 
-## 1. Sequence Overview
+## 1. Sensor Specifications
+
+| Parameter | Value |
+|-----------|-------|
+| Detector type | Global shutter, grayscale |
+| Resolution | 1024 × 1024 (2×2 summed) |
+| Bit depth | 8 |
+| Field of view | 90° × 90° |
+| Focal length | 5.8 mm |
+| Focal ratio | f/2.7 |
+| Best focus | 2 m to infinity |
+| Exposure time | ~1 ms (label), 150 µs (integration) |
+| SNR | 80 at half full well |
+
+**Source:** Mars2020_Camera_SIS.pdf (Table 2-15, p. 49); Johnson et al. (2022) for 150 µs integration time.
+
+---
+
+## 2. Sequence Overview
 
 | Parameter | Value |
 |-----------|-------|
@@ -21,7 +39,7 @@ Consolidated from literature, local file analysis, Camera SIS, and codebase tool
 
 ---
 
-## 2. Altitude Profile
+## 3. Altitude Profile
 
 | Parameter | Value |
 |-----------|-------|
@@ -54,7 +72,7 @@ Consolidated from literature, local file analysis, Camera SIS, and codebase tool
 
 ---
 
-## 3. Frame Rate Strategy
+## 4. Frame Rate Strategy
 
 LCAM used a **variable frame rate** to optimize storage while maximizing TRN performance:
 
@@ -68,7 +86,7 @@ LCAM used a **variable frame rate** to optimize storage while maximizing TRN per
 
 ---
 
-## 4. TRN Processing Breakdown
+## 5. TRN Processing Breakdown
 
 ### Coarse vs Fine Phase
 
@@ -82,8 +100,8 @@ LCAM used a **variable frame rate** to optimize storage while maximizing TRN per
 | Result | 15/15 matched | 80+ inliers/frame |
 | Position error | ~200 m | 40 m |
 
-**Position error (design):** up to 3.2 km initial → ~200 m after coarse → 40 m after fine [Johnson et al. 2022, Fig. 1]
-**Actual flight:** 137 m coarse correction applied, 5 m touchdown error [Johnson et al. 2022, §V]
+**Position error (design):** 3.2 km → 200 m (coarse) → 40 m (fine) [Johnson et al. 2022, Fig. 1]
+**Actual flight:** 137 m initial error, 137 m coarse correction applied, ~3 m after fine [Johnson et al. 2022, slides]
 
 ### Frame-to-Stage Mapping
 
@@ -93,7 +111,6 @@ LCAM used a **variable frame rate** to optimize storage while maximizing TRN per
 | **Coarse** | 25–27 | 3 |
 | **Fine** | 28–69 | 42 |
 | Tourist | 70–87 | 18 |
-| **Total TRN** | 25–69 | **45** |
 
 **Key frame:** Frame 43 = Fine image 16 = 19th MRL image — position used by STS to select landing site.
 
@@ -101,7 +118,7 @@ LCAM used a **variable frame rate** to optimize storage while maximizing TRN per
 
 ---
 
-## 5. Per-Frame Metadata
+## 6. Per-Frame Metadata
 
 Every LCAM .IMG file contains embedded metadata in the `IMAGE_HEADER` object:
 
@@ -122,6 +139,10 @@ Every LCAM .IMG file contains embedded metadata in the `IMAGE_HEADER` object:
 | O | `MODEL_COMPONENT_5` | Optical axis for distortion |
 | R | `MODEL_COMPONENT_6` | Radial distortion coefficients |
 | E | `MODEL_COMPONENT_7` | Entrance pupil parameters |
+| T | `MODEL_COMPONENT_8` | Model type: 1=perspective, 2=fish-eye, 3=general |
+| P | `MODEL_COMPONENT_9` | Type-3 parameter (0=fish-eye, 1=perspective) |
+
+**LCAM values:** T=2 (fish-eye), P=0
 
 ### Timing
 | Field | Description |
@@ -129,48 +150,29 @@ Every LCAM .IMG file contains embedded metadata in the `IMAGE_HEADER` object:
 | `START_TIME` | UTC timestamp (shutter open) |
 | `STOP_TIME` | UTC timestamp (shutter close) |
 | `SPACECRAFT_CLOCK_START_COUNT` | SCLK value |
+| `SPACECRAFT_CLOCK_MID_COUNT` | SCLK at exposure midpoint |
 | `EXPOSURE_DURATION` | ~95 ms in labels (see note) |
+| `LOCAL_MEAN_SOLAR_TIME` | Mars local time (LMST) |
+| `PLANET_DAY_NUMBER` | Sol number (0 for EDL) |
 
 **Note on EXPOSURE_DURATION:** PDS labels report ~95 ms, but Johnson et al. (2022) specifies actual sensor integration time of **150 µs**. The label value likely includes readout/transfer overhead. For motion blur calculations, use 150 µs (yields ~1 cm blur at descent speeds, consistent with TRN requirements for "crisp images").
 
----
+### EDR vs FDR Labels
 
-## 6. Key Timeline (Mission Elapsed Time)
+LCAM products exist in two forms with different pose accuracy:
 
-| Time (s) | Event |
-|----------|-------|
-| 0 | LVS power-on |
-| 753 | Imaging starts (just before heat shield separation) |
-| 831.6 | MRL (Map-Relative Localization) processing begins |
-| 833.3 | Coarse image 1 processed |
-| 834.8 | Coarse image 2 processed |
-| 836.3 | Coarse image 3 processed |
-| 836.4 | Fine processing begins |
-| 837.5 | First VALID fine position estimate (5.8s after MRL start) |
-| 853.8 | Fine image 16 (Frame 43) — used by Safe Target Selection (STS) |
-| 882.3 | Fine image 42 — last fine estimate |
-| 882.3 | Enter TOURIST mode |
-| 943.3 | Start writing data products |
-| ~1170 | LVS power-off (417s total operation) |
+| Product | Pose Source | Accuracy |
+|---------|-------------|----------|
+| **EDR** | Onboard LVS Kalman filter | ~meters |
+| **FDR** | Post-landing trajectory reconstruction | sub-meter |
 
-**Source:** Johnson et al. (2022)
+The FDR poses were derived by combining DIMU (Descent Inertial Measurement Unit) data with optical observations, backward-integrated from the landing site. The landing position was co-referenced to HiRISE-derived maps using rover navigation camera orthophotos.
+
+**Source:** Mars2020_Camera_SIS.pdf — CAHVORE model (Section 8.2.1, pp. 122–127), coordinate frames (Section 20.10, p. 240), LCAM label updates (Section 6.3.2, pp. 104–105)
 
 ---
 
-## 7. Processing Timing Margins
-
-All timing deadlines met with significant margin:
-
-| Operation | Allocated | Actual | Margin |
-|-----------|-----------|--------|--------|
-| LCAM image capture | 171.9 ms | 109.9 ms | 36% |
-| Coarse image processing | 1296.9 ms | 979.5 ms | 24% |
-| Fine image processing | 750.0 ms | 555.7 ms | 26% |
-| Fine position update | 93.8 ms | 55.7 ms | 41% |
-
----
-
-## 8. File Structure
+## 7. File Structure
 
 ### Filename Convention
 ```
@@ -194,9 +196,11 @@ Example: `ELM_0000_0666952774_000FDR_N0000001LVS_04000_0000LUJ01.IMG`
 2. **IMAGE_HEADER** — Binary key=value metadata (pose, CAHVORE)
 3. **Image Data** — 1024×1024 raw pixels (8-bit grayscale, BSQ)
 
+**Source:** Mars2020_Camera_SIS.pdf — Section 18 "File Naming Standards" (pp. 198+), LCAM processing (Section 5.6.8, p. 94)
+
 ---
 
-## 9. Sample Frames
+## 8. Sample Frames
 
 ### Frame 1 (Sequence Start)
 | Parameter | Value |
@@ -227,7 +231,7 @@ Example: `ELM_0000_0666952774_000FDR_N0000001LVS_04000_0000LUJ01.IMG`
 
 ---
 
-## 10. What Makes LCAM Unique Among EDL Cameras
+## 9. What Makes LCAM Unique Among EDL Cameras
 
 | Feature | LCAM | RDCAM | Other EDL Cams |
 |---------|------|-------|----------------|
@@ -237,25 +241,14 @@ Example: `ELM_0000_0666952774_000FDR_N0000001LVS_04000_0000LUJ01.IMG`
 | Frame rate | Variable 0.3-1 Hz | Fixed 30 fps | Various |
 | Total frames | 87 | ~7000 | Varies |
 
-**LCAM is the only EDL camera with complete 6-DOF pose in every frame header**, enabling direct 3D reconstruction and orbital imagery matching without external trajectory data.
+**LCAM is the only EDL camera with complete 6-DOF pose in every frame header**.
 
 ---
 
-## 11. References
+## 10. References
 
 - **Maki et al. (2020)** — Camera specifications, frame rate strategy
 - **Johnson et al. (2017)** — LVS system design, requirements
 - **Johnson et al. (2022)** — Flight performance, timeline, processing results
 - **Mohan et al. (2021)** — TRN accuracy analysis
 - **Mars2020_Camera_SIS.pdf** — PDS data format, label keywords
-
----
-
-## 12. Constants Used in Analysis
-
-| Constant | Value | Source |
-|----------|-------|--------|
-| Mars sphere radius | 3,396,190 m | IAU |
-| Jezero areoid radius | 3,394,507.076 m | Camera SIS |
-| UTC format | `%Y-%m-%dT%H:%M:%S.%f` | PDS3 |
-
