@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -41,9 +42,10 @@ class FrameMetadata:
 
     # Canonical timing
     sclk_partition: Optional[int]
-    sclk_start: Optional[float]
-    sclk_stop: Optional[float]
-    sclk_mid: Optional[float]
+    # NOTE: store SCLK as integer ticks (1 tick = 1/65536 sec for M2020/MSL) to avoid float precision loss.
+    sclk_start_ticks: Optional[int]
+    sclk_stop_ticks: Optional[int]
+    sclk_start_raw: Optional[str]
     start_time: Optional[str]
     stop_time: Optional[str]
 
@@ -138,6 +140,44 @@ def _as_float(v: Optional[ODLValue]) -> Optional[float]:
         return None
 
 
+def _strip_outer_quotes(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
+        return s[1:-1]
+    return s
+
+
+def _as_raw_str(v: Optional[ODLValue]) -> Optional[str]:
+    if v is None:
+        return None
+    return _strip_outer_quotes(v.raw)
+
+
+def _sclk_decimal_seconds_to_ticks(sclk_decimal_seconds: str, *, ticks_per_sec: int = 65536) -> Optional[int]:
+    """
+    Convert a label SCLK like "666952834.305263901" (decimal seconds) into integer ticks.
+
+    For M2020 and MSL, the SCLK fine field is ticks of 1/65536 sec (see SCLK01_MODULI_* = (... 65536)).
+    """
+    s = sclk_decimal_seconds.strip()
+    if not s:
+        return None
+    try:
+        d = Decimal(s)
+    except Exception:
+        return None
+
+    coarse = int(d.to_integral_value(rounding=ROUND_FLOOR))
+    frac = d - Decimal(coarse)
+    fine = int((frac * Decimal(ticks_per_sec)).to_integral_value(rounding=ROUND_HALF_UP))
+    if fine >= ticks_per_sec:
+        coarse += 1
+        fine -= ticks_per_sec
+    if fine < 0:
+        fine = 0
+    return coarse * ticks_per_sec + fine
+
+
 def _derive_frame_index(camera: str, filename: str) -> Optional[int]:
     if camera.lower() != "lcam":
         return None
@@ -168,17 +208,18 @@ def load_frame_metadata(img_path: str | Path, *, mission: str, camera: str) -> F
     # Canonical timing for sorting/pose: fail fast if ambiguous.
     sclk_partition = _as_int(_get_optional_unique(tree, "SPACECRAFT_CLOCK_CNT_PARTITION"))
     try:
-        sclk_start = _as_float(_get_optional_unique(tree, "SPACECRAFT_CLOCK_START_COUNT"))
+        sclk_start_val = _get_optional_unique(tree, "SPACECRAFT_CLOCK_START_COUNT")
     except Exception as e:
         raise ValueError(f"{img_path}: missing/ambiguous SPACECRAFT_CLOCK_START_COUNT ({e})") from e
     try:
-        sclk_stop = _as_float(_get_optional_unique(tree, "SPACECRAFT_CLOCK_STOP_COUNT"))
+        sclk_stop_val = _get_optional_unique(tree, "SPACECRAFT_CLOCK_STOP_COUNT")
     except Exception as e:
         raise ValueError(f"{img_path}: missing/ambiguous SPACECRAFT_CLOCK_STOP_COUNT ({e})") from e
-    sclk_mid = _as_float(_get_optional_unique(tree, "SPACECRAFT_CLOCK_MID_COUNT"))
 
-    if sclk_mid is None and sclk_start is not None and sclk_stop is not None:
-        sclk_mid = (sclk_start + sclk_stop) / 2.0
+    sclk_start_raw = _as_raw_str(sclk_start_val)
+    sclk_stop_raw = _as_raw_str(sclk_stop_val)
+    sclk_start_ticks = _sclk_decimal_seconds_to_ticks(sclk_start_raw) if sclk_start_raw else None
+    sclk_stop_ticks = _sclk_decimal_seconds_to_ticks(sclk_stop_raw) if sclk_stop_raw else None
 
     start_time = _as_str(_get_optional_unique(tree, "START_TIME"))
     stop_time = _as_str(_get_optional_unique(tree, "STOP_TIME"))
@@ -219,9 +260,9 @@ def load_frame_metadata(img_path: str | Path, *, mission: str, camera: str) -> F
         label_text=label_text,
         label_tree=tree,
         sclk_partition=sclk_partition,
-        sclk_start=sclk_start,
-        sclk_stop=sclk_stop,
-        sclk_mid=sclk_mid,
+        sclk_start_ticks=sclk_start_ticks,
+        sclk_stop_ticks=sclk_stop_ticks,
+        sclk_start_raw=sclk_start_raw,
         start_time=start_time,
         stop_time=stop_time,
         product_id=product_id,

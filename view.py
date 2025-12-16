@@ -195,8 +195,8 @@ class SPICEManager:
         except Exception as e:
             print(f"Warning: Failed to load SPICE kernels: {e}")
 
-    def query_pose(self, sclk: float, camera: str, *, sclk_partition: Optional[int] = None) -> Optional[PoseData]:
-        """Query pose from SPICE kernels using SCLK."""
+    def query_pose(self, sclk_ticks: int, camera: str, *, sclk_partition: Optional[int] = None) -> Optional[PoseData]:
+        """Query pose from SPICE kernels using SCLK ticks."""
         if not self.loaded:
             return None
 
@@ -205,14 +205,9 @@ class SPICEManager:
             sc_id = -168 if self.mission == 'm2020' else -76
             if self.mission in ("m2020", "msl"):
                 # M2020/MSL SCLK format is "SSSSSSSSSS-FFFFF", where FFFFF are ticks of 1/65536 sec.
-                coarse = int(sclk)
-                frac_sec = float(sclk) - coarse
-                fine = int(round(frac_sec * 65536.0))
-                if fine >= 65536:
-                    coarse += 1
-                    fine -= 65536
-                if fine < 0:
-                    fine = 0
+                ticks_per_sec = 65536
+                coarse = int(sclk_ticks // ticks_per_sec)
+                fine = int(sclk_ticks % ticks_per_sec)
 
                 partition = 1
                 if sclk_partition is not None:
@@ -237,9 +232,7 @@ class SPICEManager:
                         last_err = e
                 raise last_err if last_err is not None else RuntimeError("SPICE SCLK conversion failed")
 
-            sclk_str = f"{int(sclk)}.{int((sclk % 1) * 1000):03d}"
-            et = spice.scs2e(sc_id, sclk_str)
-            return self.query_pose_et(et, camera)
+            raise RuntimeError(f"Unsupported mission for SCLK query: {self.mission}")
         except Exception as e:
             print(f"SPICE query failed: {e}")
             return None
@@ -349,33 +342,20 @@ def get_pose(
 
     # Fallback to SPICE
     if spice_mgr:
-        et: Optional[float] = None
-        if meta.start_time and meta.stop_time:
+        # Convention: use START (time or SCLK).
+        time_str = meta.start_time or meta.stop_time
+        if time_str:
             try:
-                et0 = spice.str2et(meta.start_time)
-                et1 = spice.str2et(meta.stop_time)
-                et = (et0 + et1) / 2.0
+                et = spice.str2et(time_str)
+                pose = spice_mgr.query_pose_et(et, meta.camera)
+                if pose:
+                    return pose
             except Exception:
-                et = None
-        elif meta.start_time:
-            try:
-                et = spice.str2et(meta.start_time)
-            except Exception:
-                et = None
-        elif meta.stop_time:
-            try:
-                et = spice.str2et(meta.stop_time)
-            except Exception:
-                et = None
+                pass
 
-        if et is not None:
-            pose = spice_mgr.query_pose_et(et, meta.camera)
-            if pose:
-                return pose
-
-        sclk = meta.sclk_start
-        if sclk is not None and sclk > 0:
-            pose = spice_mgr.query_pose(float(sclk), meta.camera, sclk_partition=meta.sclk_partition)
+        sclk_ticks = meta.sclk_start_ticks
+        if sclk_ticks is not None and sclk_ticks > 0:
+            pose = spice_mgr.query_pose(int(sclk_ticks), meta.camera, sclk_partition=meta.sclk_partition)
             if pose:
                 return pose
 
@@ -442,7 +422,7 @@ def read_image(img_path: Path, camera: str, profiler: Optional[FrameProfiler] = 
 
 
 def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
-                   meta: FrameMetadata, sclk: float, paused: bool,
+                   meta: FrameMetadata, sclk_display: str, paused: bool,
                    spice_mgr: Optional[SPICEManager] = None) -> None:
     """Render metadata overlay on image (in-place)."""
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -469,7 +449,7 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
     extra = ""
     if meta.frame_index is not None:
         extra = f" | N{meta.frame_index}"
-    text = f"Frame {idx+1}/{total} | SCLK: {sclk:.3f} | Camera: {meta.camera.upper()}{extra}"
+    text = f"Frame {idx+1}/{total} | SCLK: {sclk_display} | Camera: {meta.camera.upper()}{extra}"
     cv2.putText(img, text, (20, 35), font, 0.6, color, 2)
 
     # Line 2: Filename
@@ -479,14 +459,11 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
     # Pose (if available)
     y = 95
     if meta.camera == "lcam" and spice_mgr and spice_mgr.loaded:
-        # For LCAM, compare embedded header pose vs SPICE using:
-        # 1) mid-point of START_TIME/STOP_TIME only (no fallback).
+        # For LCAM, compare embedded header pose vs SPICE using START_TIME only.
         spice_pose = None
         try:
-            if meta.start_time and meta.stop_time:
-                et0 = spice.str2et(meta.start_time)
-                et1 = spice.str2et(meta.stop_time)
-                spice_pose = spice_mgr.query_pose_et((et0 + et1) / 2.0, meta.camera)
+            if meta.start_time:
+                spice_pose = spice_mgr.query_pose_et(spice.str2et(meta.start_time), meta.camera)
         except Exception:
             spice_pose = None
 
@@ -608,7 +585,7 @@ def main():
     if camera == "lcam" and mission == "m2020":
         metas.sort(key=lambda m: (0, m.frame_index) if m.frame_index is not None else (1, m.filename))
     else:
-        metas.sort(key=lambda m: (m.sclk_start if m.sclk_start is not None else 0.0, m.filename))
+        metas.sort(key=lambda m: (m.sclk_start_ticks if m.sclk_start_ticks is not None else 0, m.filename))
 
     # Load SPICE kernels
     spice_mgr = None
@@ -650,7 +627,14 @@ def main():
 
             # Get pose for current frame
             pose = poses[idx]
-            sclk = meta.sclk_start if meta.sclk_start is not None else 0.0
+            if meta.sclk_start_raw:
+                sclk_display = meta.sclk_start_raw
+            elif meta.sclk_start_ticks is not None:
+                coarse = meta.sclk_start_ticks // 65536
+                fine = meta.sclk_start_ticks % 65536
+                sclk_display = f"{coarse}-{fine:05d}"
+            else:
+                sclk_display = "N/A"
             if show_timing:
                 profiler.mark("pose")
 
@@ -662,7 +646,7 @@ def main():
                     idx,
                     len(metas),
                     meta,
-                    sclk,
+                    sclk_display,
                     paused,
                     spice_mgr,
                 )
