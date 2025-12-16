@@ -425,9 +425,18 @@ def read_image(img_path: Path, camera: str, profiler: Optional[FrameProfiler] = 
         return None
 
 
-def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
-                   meta: FrameMetadata, sclk_display: str, paused: bool,
-                   spice_mgr: Optional[SPICEManager] = None) -> None:
+def render_overlay(
+    img: np.ndarray,
+    pose: PoseData,
+    idx: int,
+    total: int,
+    meta: FrameMetadata,
+    sclk_display: str,
+    paused: bool,
+    spice_mgr: Optional[SPICEManager] = None,
+    *,
+    show_spice_grid: bool = False,
+) -> None:
     """Render metadata overlay on image (in-place)."""
     font = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -443,7 +452,7 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
 
     # Semi-transparent background
     h, w = img.shape[:2]
-    overlay_h = 260 if meta.camera == "lcam" else 150
+    overlay_h = 420 if (meta.camera == "lcam" and show_spice_grid) else (260 if meta.camera == "lcam" else 150)
     overlay_bg = np.zeros((overlay_h, 600, 3), dtype=np.uint8)
     overlay_bg[:] = (20, 20, 20)
     roi = img[10:10 + overlay_h, 10:610]
@@ -463,22 +472,7 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
     # Pose (if available)
     y = 95
     if meta.camera == "lcam" and spice_mgr and spice_mgr.loaded:
-        # For LCAM, compare embedded header pose vs SPICE at multiple timing choices.
-        spice_entries: list[tuple[str, Optional[PoseData]]] = []
-        try:
-            et_start = spice.str2et(meta.start_time) if meta.start_time else None
-            et_stop = spice.str2et(meta.stop_time) if meta.stop_time else None
-        except Exception:
-            et_start = None
-            et_stop = None
-
-        if et_start is not None:
-            spice_entries.append(("start", spice_mgr.query_pose_et(et_start, meta.camera)))
-        if et_start is not None and et_stop is not None:
-            spice_entries.append(("mid", spice_mgr.query_pose_et((et_start + et_stop) / 2.0, meta.camera)))
-        if et_stop is not None:
-            spice_entries.append(("stop", spice_mgr.query_pose_et(et_stop, meta.camera)))
-
+        # For LCAM, compare embedded header pose vs SPICE.
         if pose.lat_deg is not None:
             cv2.putText(img, f"Header: {pose.lat_deg:.4f}°N, {pose.lon_deg:.4f}°E  alt {pose.altitude_m:.0f} m", (20, y), font, 0.5, (0, 255, 0), 1)
             y += 25
@@ -486,35 +480,84 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
             cv2.putText(img, "Header: UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
             y += 25
 
-        if not spice_entries:
-            cv2.putText(img, "SPICE:  UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
-            y += 25
+        if not show_spice_grid:
+            # Quick single sample at START_TIME if available.
+            spice_pose = None
+            try:
+                if meta.start_time:
+                    spice_pose = spice_mgr.query_pose_et(spice.str2et(meta.start_time), meta.camera)
+            except Exception:
+                spice_pose = None
+            if spice_pose and spice_pose.lat_deg is not None:
+                cv2.putText(
+                    img,
+                    f"SPICE(start): {spice_pose.lat_deg:.4f}°N, {spice_pose.lon_deg:.4f}°E  alt {spice_pose.altitude_m:.0f} m",
+                    (20, y),
+                    font,
+                    0.5,
+                    (0, 255, 255),
+                    1,
+                )
+                y += 25
+            else:
+                cv2.putText(img, "SPICE(start): UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
+                y += 25
         else:
-            for label, spice_pose in spice_entries:
-                if spice_pose and spice_pose.lat_deg is not None:
-                    cv2.putText(
-                        img,
-                        f"SPICE({label}): {spice_pose.lat_deg:.4f}°N, {spice_pose.lon_deg:.4f}°E  alt {spice_pose.altitude_m:.0f} m",
-                        (20, y),
-                        font,
-                        0.5,
-                        (0, 255, 255),
-                        1,
-                    )
+            # Grid search: +/-0.3s around START_TIME in 0.05s steps.
+            if not meta.start_time:
+                cv2.putText(img, "SPICE grid: no START_TIME", (20, y), font, 0.5, (0, 0, 255), 1)
+                y += 25
+            else:
+                try:
+                    et0 = spice.str2et(meta.start_time)
+                except Exception:
+                    et0 = None
+                if et0 is None:
+                    cv2.putText(img, "SPICE grid: bad START_TIME", (20, y), font, 0.5, (0, 0, 255), 1)
                     y += 25
-                    if pose.position_xyz is not None and spice_pose.position_xyz is not None:
-                        d_m = float(np.linalg.norm(pose.position_xyz - spice_pose.position_xyz))
+                else:
+                    offsets = [round(-0.3 + i * 0.05, 2) for i in range(13)]
+                    results: list[tuple[float, Optional[float], Optional[float]]] = []
+                    best_offset: Optional[float] = None
+                    best_d_pos: Optional[float] = None
+                    for dt in offsets:
+                        spice_pose = spice_mgr.query_pose_et(et0 + dt, meta.camera)
+                        if pose.position_xyz is None or spice_pose is None or spice_pose.position_xyz is None:
+                            results.append((dt, None, None))
+                            continue
+                        d_pos = float(np.linalg.norm(pose.position_xyz - spice_pose.position_xyz))
                         d_alt = None
                         if pose.altitude_m is not None and spice_pose.altitude_m is not None:
                             d_alt = float(spice_pose.altitude_m - pose.altitude_m)
-                        if d_alt is None:
-                            cv2.putText(img, f"  |Δpos|: {d_m:.1f} m", (20, y), font, 0.5, (255, 255, 255), 1)
-                        else:
-                            cv2.putText(img, f"  |Δpos|: {d_m:.1f} m  Δalt: {d_alt:+.1f} m", (20, y), font, 0.5, (255, 255, 255), 1)
-                        y += 25
-                else:
-                    cv2.putText(img, f"SPICE({label}): UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
+                        results.append((dt, d_pos, d_alt))
+                        if best_d_pos is None or d_pos < best_d_pos:
+                            best_d_pos = d_pos
+                            best_offset = dt
+
+                    if best_offset is not None and best_d_pos is not None:
+                        cv2.putText(img, f"SPICE grid: best dt={best_offset:+.2f}s  |Δpos|={best_d_pos:.2f}m", (20, y), font, 0.5, (255, 255, 255), 1)
+                    else:
+                        cv2.putText(img, "SPICE grid: no valid comparisons", (20, y), font, 0.5, (0, 0, 255), 1)
                     y += 25
+
+                    # Render two columns of offsets.
+                    left = results[:7]
+                    right = results[7:]
+                    col_x = [20, 320]
+                    row_h = 20
+                    for col, rows in enumerate((left, right)):
+                        y0 = y
+                        for dt, d_pos, d_alt in rows:
+                            star = "*" if (best_offset is not None and abs(dt - best_offset) < 1e-9) else " "
+                            if d_pos is None:
+                                line = f"{star}{dt:+.2f}s  --"
+                            else:
+                                if d_alt is None:
+                                    line = f"{star}{dt:+.2f}s  {d_pos:5.2f}m"
+                                else:
+                                    line = f"{star}{dt:+.2f}s  {d_pos:5.2f}m  {d_alt:+6.2f}m"
+                            cv2.putText(img, line, (col_x[col], y0), font, 0.45, (255, 255, 255), 1)
+                            y0 += row_h
     else:
         if pose.lat_deg is not None:
             text = f"Position: {pose.lat_deg:.4f}°N, {pose.lon_deg:.4f}°E"
@@ -634,7 +677,7 @@ def main():
     minimap_cache = build_minimap_cache(trajectory)
 
     # Setup viewer
-    print("Controls: Space=pause, Q=quit, Left/Right=step, +/-=speed, M=minimap, O=overlay, T=timing")
+    print("Controls: Space=pause, Q=quit, Left/Right=step, +/-=speed, M=minimap, O=overlay, G=spice grid, T=timing")
     cv2.namedWindow("EDL Viewer", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("EDL Viewer", 1280, 960)
 
@@ -644,6 +687,7 @@ def main():
     show_minimap = not args.no_minimap
     show_overlay = True
     show_timing = False
+    show_spice_grid = False
     profiler = FrameProfiler(window=30)
 
     # Main loop
@@ -680,6 +724,7 @@ def main():
                     sclk_display,
                     paused,
                     spice_mgr,
+                    show_spice_grid=show_spice_grid,
                 )
                 if show_timing:
                     profiler.mark("overlay")
@@ -738,6 +783,9 @@ def main():
             if not show_overlay:
                 profiler.clear("overlay")
             print(f"Overlay: {'ON' if show_overlay else 'OFF'}")
+        elif key == ord('g'):
+            show_spice_grid = not show_spice_grid
+            print(f"SPICE grid: {'ON' if show_spice_grid else 'OFF'}")
         elif key == ord('t'):
             show_timing = not show_timing
             if show_timing:
