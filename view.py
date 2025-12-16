@@ -78,8 +78,12 @@ class FrameProfiler:
 
 # Import PDS3 parser
 sys.path.insert(0, str(Path(__file__).parent))
-from pds_img import infer_pds3_layout_fast, read_image_header_text
-from pds_metadata import FrameMetadata, load_frame_metadata
+from pds3 import (
+    infer_pds3_layout_fast,
+    read_image_header_text,
+    FrameMetadata,
+    load_frame_metadata,
+)
 
 # Optional: fast BSQ (RGB) -> BGR converter (Apple Silicon NEON Cython extension).
 try:
