@@ -199,44 +199,49 @@ class SPICEManager:
         except Exception as e:
             print(f"Warning: Failed to load SPICE kernels: {e}")
 
+    def sclk_ticks_to_et(self, sclk_ticks: int, *, sclk_partition: Optional[int] = None) -> float:
+        """Convert SCLK ticks to ephemeris time (ET)."""
+        if not self.loaded:
+            raise RuntimeError("SPICE kernels not loaded")
+
+        sc_id = -168 if self.mission == "m2020" else -76
+        if self.mission in ("m2020", "msl"):
+            ticks_per_sec = 65536
+            coarse = int(sclk_ticks // ticks_per_sec)
+            fine = int(sclk_ticks % ticks_per_sec)
+
+            partition = 1
+            if sclk_partition is not None:
+                try:
+                    parsed_partition = int(sclk_partition)
+                    if parsed_partition > 0:
+                        partition = parsed_partition
+                except Exception:
+                    pass
+
+            sclk_prefix = f"{partition}/"
+            candidates = (
+                f"{sclk_prefix}{coarse}-{fine:05d}",
+                f"{sclk_prefix}{coarse}.{fine:05d}",
+            )
+            last_err: Optional[Exception] = None
+            for sclk_str in candidates:
+                try:
+                    return float(spice.scs2e(sc_id, sclk_str))
+                except Exception as e:
+                    last_err = e
+            raise last_err if last_err is not None else RuntimeError("SPICE SCLK conversion failed")
+
+        raise RuntimeError(f"Unsupported mission for SCLK conversion: {self.mission}")
+
     def query_pose(self, sclk_ticks: int, camera: str, *, sclk_partition: Optional[int] = None) -> Optional[PoseData]:
         """Query pose from SPICE kernels using SCLK ticks."""
         if not self.loaded:
             return None
 
         try:
-            # Convert SCLK to ephemeris time
-            sc_id = -168 if self.mission == 'm2020' else -76
-            if self.mission in ("m2020", "msl"):
-                # M2020/MSL SCLK format is "SSSSSSSSSS-FFFFF", where FFFFF are ticks of 1/65536 sec.
-                ticks_per_sec = 65536
-                coarse = int(sclk_ticks // ticks_per_sec)
-                fine = int(sclk_ticks % ticks_per_sec)
-
-                partition = 1
-                if sclk_partition is not None:
-                    try:
-                        parsed_partition = int(sclk_partition)
-                        if parsed_partition > 0:
-                            partition = parsed_partition
-                    except Exception:
-                        pass
-                sclk_prefix = f"{partition}/"
-                candidates = (
-                    f"{sclk_prefix}{coarse}-{fine:05d}",
-                    f"{sclk_prefix}{coarse}.{fine:05d}",
-                )
-
-                last_err: Optional[Exception] = None
-                for sclk_str in candidates:
-                    try:
-                        et = spice.scs2e(sc_id, sclk_str)
-                        return self.query_pose_et(et, camera)
-                    except Exception as e:
-                        last_err = e
-                raise last_err if last_err is not None else RuntimeError("SPICE SCLK conversion failed")
-
-            raise RuntimeError(f"Unsupported mission for SCLK query: {self.mission}")
+            et = self.sclk_ticks_to_et(sclk_ticks, sclk_partition=sclk_partition)
+            return self.query_pose_et(et, camera)
         except Exception as e:
             print(f"SPICE query failed: {e}")
             return None
@@ -346,17 +351,7 @@ def get_pose(
 
     # Fallback to SPICE
     if spice_mgr:
-        # Convention: use START (time or SCLK).
-        time_str = meta.start_time or meta.stop_time
-        if time_str:
-            try:
-                et = spice.str2et(time_str)
-                pose = spice_mgr.query_pose_et(et, meta.camera)
-                if pose:
-                    return pose
-            except Exception:
-                pass
-
+        # Convention: use START SCLK (avoid UTC parsing).
         sclk_ticks = meta.sclk_start_ticks
         if sclk_ticks is not None and sclk_ticks > 0:
             pose = spice_mgr.query_pose(int(sclk_ticks), meta.camera, sclk_partition=meta.sclk_partition)
@@ -481,11 +476,15 @@ def render_overlay(
             y += 25
 
         if not show_spice_grid:
-            # Quick single sample at START_TIME if available.
+            # Quick single sample at START SCLK.
             spice_pose = None
             try:
-                if meta.start_time:
-                    spice_pose = spice_mgr.query_pose_et(spice.str2et(meta.start_time), meta.camera)
+                if meta.sclk_start_ticks is not None and meta.sclk_start_ticks > 0:
+                    spice_pose = spice_mgr.query_pose(
+                        int(meta.sclk_start_ticks),
+                        meta.camera,
+                        sclk_partition=meta.sclk_partition,
+                    )
             except Exception:
                 spice_pose = None
             if spice_pose and spice_pose.lat_deg is not None:
@@ -503,20 +502,20 @@ def render_overlay(
                 cv2.putText(img, "SPICE(start): UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
                 y += 25
         else:
-            # Grid search: +/-0.3s around START_TIME in 0.05s steps.
-            if not meta.start_time:
-                cv2.putText(img, "SPICE grid: no START_TIME", (20, y), font, 0.5, (0, 0, 255), 1)
+            # Grid search: +/-50ms around START SCLK in 10ms steps.
+            if meta.sclk_start_ticks is None or meta.sclk_start_ticks <= 0:
+                cv2.putText(img, "SPICE grid: no SCLK_START", (20, y), font, 0.5, (0, 0, 255), 1)
                 y += 25
             else:
                 try:
-                    et0 = spice.str2et(meta.start_time)
+                    et0 = spice_mgr.sclk_ticks_to_et(int(meta.sclk_start_ticks), sclk_partition=meta.sclk_partition)
                 except Exception:
                     et0 = None
                 if et0 is None:
-                    cv2.putText(img, "SPICE grid: bad START_TIME", (20, y), font, 0.5, (0, 0, 255), 1)
+                    cv2.putText(img, "SPICE grid: bad SCLK_START", (20, y), font, 0.5, (0, 0, 255), 1)
                     y += 25
                 else:
-                    offsets_hundredths = list(range(-5, 6))  # -0.05s..+0.05s in 0.01s steps
+                    offsets_hundredths = list(range(-5, 6))  # -50ms..+50ms in 10ms steps
                     results: list[tuple[int, Optional[float], Optional[float]]] = []
                     best_offset_hundredths: Optional[int] = None
                     best_d_pos: Optional[float] = None

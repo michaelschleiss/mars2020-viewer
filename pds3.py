@@ -726,11 +726,18 @@ def load_frame_metadata(img_path: str | Path, *, mission: str, camera: str) -> F
 
     # Canonical timing for sorting/pose: fail fast if ambiguous.
     sclk_partition = _get_int_field(tree, "SPACECRAFT_CLOCK_CNT_PARTITION")
+
+    # START_COUNT is required for frame sorting
     sclk_start_val = _get_required_unique(tree, "SPACECRAFT_CLOCK_START_COUNT", str(img_path))
-    sclk_stop_val = _get_required_unique(tree, "SPACECRAFT_CLOCK_STOP_COUNT", str(img_path))
+
+    # STOP_COUNT is optional (not present in some RDCAM products)
+    try:
+        sclk_stop_val = _get_optional_unique(tree, "SPACECRAFT_CLOCK_STOP_COUNT")
+    except Exception as e:
+        raise ValueError(f"{img_path}: ambiguous SPACECRAFT_CLOCK_STOP_COUNT ({e})") from e
 
     sclk_start_raw = _as_raw_str(sclk_start_val)
-    sclk_stop_raw = _as_raw_str(sclk_stop_val)
+    sclk_stop_raw = _as_raw_str(sclk_stop_val) if sclk_stop_val else None
     sclk_start_ticks = _sclk_decimal_seconds_to_ticks(sclk_start_raw) if sclk_start_raw else None
     sclk_stop_ticks = _sclk_decimal_seconds_to_ticks(sclk_stop_raw) if sclk_stop_raw else None
 
