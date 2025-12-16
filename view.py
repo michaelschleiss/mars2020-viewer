@@ -516,39 +516,43 @@ def render_overlay(
                     cv2.putText(img, "SPICE grid: bad START_TIME", (20, y), font, 0.5, (0, 0, 255), 1)
                     y += 25
                 else:
-                    offsets = [round(-0.3 + i * 0.05, 2) for i in range(13)]
-                    results: list[tuple[float, Optional[float], Optional[float]]] = []
-                    best_offset: Optional[float] = None
+                    offsets_hundredths = list(range(-5, 6))  # -0.05s..+0.05s in 0.01s steps
+                    results: list[tuple[int, Optional[float], Optional[float]]] = []
+                    best_offset_hundredths: Optional[int] = None
                     best_d_pos: Optional[float] = None
-                    for dt in offsets:
+                    for off in offsets_hundredths:
+                        dt = off / 100.0
                         spice_pose = spice_mgr.query_pose_et(et0 + dt, meta.camera)
                         if pose.position_xyz is None or spice_pose is None or spice_pose.position_xyz is None:
-                            results.append((dt, None, None))
+                            results.append((off, None, None))
                             continue
                         d_pos = float(np.linalg.norm(pose.position_xyz - spice_pose.position_xyz))
                         d_alt = None
                         if pose.altitude_m is not None and spice_pose.altitude_m is not None:
                             d_alt = float(spice_pose.altitude_m - pose.altitude_m)
-                        results.append((dt, d_pos, d_alt))
+                        results.append((off, d_pos, d_alt))
                         if best_d_pos is None or d_pos < best_d_pos:
                             best_d_pos = d_pos
-                            best_offset = dt
+                            best_offset_hundredths = off
 
-                    if best_offset is not None and best_d_pos is not None:
-                        cv2.putText(img, f"SPICE grid: best dt={best_offset:+.2f}s  |Δpos|={best_d_pos:.2f}m", (20, y), font, 0.5, (255, 255, 255), 1)
+                    if best_offset_hundredths is not None and best_d_pos is not None:
+                        best_dt = best_offset_hundredths / 100.0
+                        cv2.putText(img, f"SPICE grid: best dt={best_dt:+.2f}s  |Δpos|={best_d_pos:.2f}m", (20, y), font, 0.5, (255, 255, 255), 1)
                     else:
                         cv2.putText(img, "SPICE grid: no valid comparisons", (20, y), font, 0.5, (0, 0, 255), 1)
                     y += 25
 
                     # Render two columns of offsets.
-                    left = results[:7]
-                    right = results[7:]
+                    split = (len(results) + 1) // 2
+                    left = results[:split]
+                    right = results[split:]
                     col_x = [20, 320]
                     row_h = 20
                     for col, rows in enumerate((left, right)):
                         y0 = y
-                        for dt, d_pos, d_alt in rows:
-                            star = "*" if (best_offset is not None and abs(dt - best_offset) < 1e-9) else " "
+                        for off, d_pos, d_alt in rows:
+                            dt = off / 100.0
+                            star = "*" if (best_offset_hundredths is not None and off == best_offset_hundredths) else " "
                             if d_pos is None:
                                 line = f"{star}{dt:+.2f}s  --"
                             else:
