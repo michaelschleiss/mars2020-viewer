@@ -251,7 +251,13 @@ def extract_sclk(filepath: str, mission: str) -> float:
     return 0.0
 
 
-def get_pose(img_path: Path, camera: str, mission: str, spice_mgr: Optional[SPICEManager]) -> PoseData:
+def get_pose(
+    img_path: Path,
+    camera: str,
+    mission: str,
+    spice_mgr: Optional[SPICEManager],
+    sclk: Optional[float] = None,
+) -> PoseData:
     """
     Get pose data for a frame.
 
@@ -300,9 +306,10 @@ def get_pose(img_path: Path, camera: str, mission: str, spice_mgr: Optional[SPIC
                 pass
             # If header timing can't be parsed, fall through to SCLK-based SPICE.
 
-        sclk = extract_sclk(str(img_path), mission)
-        if sclk > 0:
-            pose = spice_mgr.query_pose(sclk, camera)
+        if sclk is None:
+            sclk = extract_sclk(str(img_path), mission)
+        if sclk and sclk > 0:
+            pose = spice_mgr.query_pose(float(sclk), camera)
             if pose:
                 return pose
 
@@ -539,16 +546,27 @@ def main():
         print(f"Error: {e}")
         return 1
 
-    # Find image files
+    # Find image files (and cache SCLK ordering if available)
+    sclks: list[Optional[float]]
     if camera == 'mardi':
-        pattern = str(args.path / "0000MD*.LBL")
-        files = sorted(glob.glob(pattern))
-        # Convert .LBL to .IMG paths
-        filenames = [f.replace('.LBL', '.IMG').replace('.lbl', '.IMG') for f in files]
+        lbl_pattern_upper = str(args.path / "0000MD*.LBL")
+        lbl_pattern_lower = str(args.path / "0000MD*.lbl")
+        lbl_files = sorted(glob.glob(lbl_pattern_upper) + glob.glob(lbl_pattern_lower))
+        filenames = []
+        for lbl in lbl_files:
+            img_path = Path(lbl).with_suffix(".IMG")
+            if not img_path.exists():
+                img_path = Path(lbl).with_suffix(".img")
+            filenames.append(img_path)
+        sclks = [None] * len(filenames)
     else:
-        pattern = str(args.path / "*.IMG")
-        filenames = sorted(glob.glob(pattern),
-                          key=lambda f: extract_sclk(f, mission))
+        img_pattern_upper = str(args.path / "*.IMG")
+        img_pattern_lower = str(args.path / "*.img")
+        img_files = glob.glob(img_pattern_upper) + glob.glob(img_pattern_lower)
+        entries = [(extract_sclk(f, mission), Path(f)) for f in img_files]
+        entries.sort(key=lambda x: x[0])
+        sclks = [s for s, _ in entries]
+        filenames = [p for _, p in entries]
 
     if not filenames:
         print(f"No images found in {args.path}")
@@ -563,9 +581,11 @@ def main():
 
     # Pre-compute trajectory for mini-map
     print("Loading trajectory...")
+    poses = []
     trajectory = []
-    for fpath in filenames:
-        pose = get_pose(Path(fpath), camera, mission, spice_mgr)
+    for i, fpath in enumerate(filenames):
+        pose = get_pose(fpath, camera, mission, spice_mgr, sclk=sclks[i])
+        poses.append(pose)
         trajectory.append((pose.lat_deg, pose.lon_deg))
 
     # Setup viewer
@@ -583,18 +603,22 @@ def main():
 
     # Main loop
     while True:
-        profiler.start()
-        fpath = Path(filenames[idx])
+        if show_timing:
+            profiler.start()
+        fpath = filenames[idx]
         img = read_image(fpath, camera, profiler if show_timing else None)
 
         if img is not None:
-            display = img.copy()
-            profiler.mark("copy")
+            display = img
 
             # Get pose for current frame
-            pose = get_pose(fpath, camera, mission, spice_mgr)
-            sclk = extract_sclk(str(fpath), mission)
-            profiler.mark("pose")
+            pose = poses[idx]
+            sclk = sclks[idx]
+            if sclk is None:
+                sclk = extract_sclk(str(fpath), mission)
+                sclks[idx] = sclk
+            if show_timing:
+                profiler.mark("pose")
 
             # Render overlays
             if show_overlay:
@@ -610,11 +634,13 @@ def main():
                     paused,
                     spice_mgr,
                 )
-                profiler.mark("overlay")
+                if show_timing:
+                    profiler.mark("overlay")
 
             if show_minimap:
                 render_minimap(display, trajectory, idx, show_minimap)
-                profiler.mark("minimap")
+                if show_timing:
+                    profiler.mark("minimap")
 
             # Timing overlay
             if show_timing:
@@ -629,7 +655,8 @@ def main():
                             (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
             cv2.imshow("EDL Viewer", display)
-            profiler.mark("display")
+            if show_timing:
+                profiler.mark("display")
 
         # Handle keyboard input
         key = cv2.waitKey(delay if not paused else 0) & 0xFF
@@ -666,6 +693,8 @@ def main():
             print(f"Overlay: {'ON' if show_overlay else 'OFF'}")
         elif key == ord('t'):
             show_timing = not show_timing
+            if show_timing:
+                profiler.timings.clear()
             print(f"Timing: {'ON' if show_timing else 'OFF'}")
         elif not paused:
             idx = (idx + 1) % len(filenames)
