@@ -212,14 +212,20 @@ def auto_detect_camera(path: Path) -> Tuple[str, str]:
 
 
 def extract_sclk(filepath: str, mission: str) -> float:
-    """Extract SCLK from filename or label."""
-    filename = Path(filepath).name
+    """Extract SCLK from label (full precision)."""
+    path = Path(filepath)
 
     if mission == 'm2020':
-        # ELM_0000_0666952774_000FDR_... or EDF_0000_0666952787_126FDR_...
-        m = re.search(r'_(\d{10})_(\d{3})FDR_', filename)
-        if m:
-            return float(f"{m.group(1)}.{m.group(2)}")
+        # Read SCLK from embedded VICAR label (first 32KB)
+        try:
+            with open(path, 'rb') as f:
+                header = f.read(32768)
+            # SPACECRAFT_CLOCK_START_COUNT=666952752.880376
+            m = re.search(rb'SPACECRAFT_CLOCK_START_COUNT=([0-9.]+)', header)
+            if m:
+                return float(m.group(1))
+        except Exception:
+            pass
 
     elif mission == 'msl':
         # Read from .LBL file for MARDI
@@ -532,7 +538,7 @@ def main():
     else:
         pattern = str(args.path / "*.IMG")
         filenames = sorted(glob.glob(pattern),
-                          key=lambda f: extract_sclk(Path(f).name, mission))
+                          key=lambda f: extract_sclk(f, mission))
 
     if not filenames:
         print(f"No images found in {args.path}")
