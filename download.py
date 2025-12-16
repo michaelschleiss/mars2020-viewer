@@ -115,7 +115,7 @@ DATASETS = {
     "mardi": {
         "name": "MARDI RDR - Sol 0000 (E01_DRCL label+image pairs)",
         "directory": f"{_MSL_BASE}/MSLMRD_0001/DATA/RDR/SURFACE/0000/",
-        "output": "data/msl/mardi",
+        "output": "data/msl/rdr",
         "pattern": r"0000MD\d+E01_DRCL\.(?:LBL|IMG)",
     },
     "mardi_lossless": {
@@ -125,7 +125,7 @@ DATASETS = {
             f"{_MSL_BASE}/MSLMRD_0002/DATA/RDR/SURFACE/0000/",
             f"{_MSL_BASE}/MSLMRD_0003/DATA/RDR/SURFACE/0000/",
         ],
-        "output": "data/msl/mardi_lossless",
+        "output": "data/msl/rdr",
         "pattern": r"0000MD\d+C0[01]_DRCL\.(?:LBL|IMG)",
     },
     **dict(_M2020_CAMS),
@@ -294,6 +294,12 @@ def get_file_size(url: str) -> int:
     """Get file size via HEAD request."""
     req = _request(url, method="HEAD")
     with urllib.request.urlopen(req, timeout=10) as resp:
+        status = getattr(resp, "status", None)
+        if status is None:
+            status = resp.getcode()
+        status = int(status)
+        if status < 200 or status >= 300:
+            raise RuntimeError(f"HEAD {url} failed with HTTP {status}")
         return int(resp.headers.get("Content-Length", 0))
 
 
