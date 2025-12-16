@@ -5,6 +5,7 @@ Unified Mars EDL Image Viewer
 Supports:
 - Mars 2020 LCAM (Lander Vision System)
 - Mars 2020 RDCAM (Rover Downlook Camera)
+- Mars 2020 DDCAM (Descent Stage Downlook Camera)
 - MSL MARDI (Mars Descent Imager)
 
 Auto-detects camera type from filename patterns.
@@ -13,6 +14,7 @@ Displays pose overlay with trajectory mini-map using SPICE kernels.
 Usage:
     python3 view.py data/m2020/lcam      # Auto-detects LCAM
     python3 view.py data/m2020/rdcam     # Auto-detects RDCAM
+    python3 view.py data/m2020/ddcam     # Auto-detects DDCAM
     python3 view.py data/msl/rdr         # Auto-detects MARDI
     python3 view.py --help
 
@@ -94,7 +96,7 @@ class SPICEManager:
             print(f"Warning: Failed to load SPICE kernels: {e}")
 
     def query_pose(self, sclk: float, camera: str) -> Optional[PoseData]:
-        """Query pose from SPICE kernels."""
+        """Query pose from SPICE kernels using SCLK."""
         if not self.loaded:
             return None
 
@@ -103,11 +105,22 @@ class SPICEManager:
             sc_id = -168 if self.mission == 'm2020' else -76
             sclk_str = f"{int(sclk)}.{int((sclk % 1) * 1000):03d}"
             et = spice.scs2e(sc_id, sclk_str)
+            return self.query_pose_et(et, camera)
+        except Exception as e:
+            print(f"SPICE query failed: {e}")
+            return None
 
+    def query_pose_et(self, et: float, camera: str) -> Optional[PoseData]:
+        """Query pose from SPICE kernels using ephemeris time (ET)."""
+        if not self.loaded:
+            return None
+
+        try:
             # Query spacecraft position
-            target = 'MARS 2020' if self.mission == 'm2020' else 'MSL'
+            target = 'M2020' if self.mission == 'm2020' else 'MSL'
             state, _ = spice.spkezr(target, et, 'IAU_MARS', 'NONE', 'MARS')
-            position = state[:3]  # meters
+            # SPICE returns km; convert to meters to match label convention
+            position = np.array(state[:3], dtype=np.float64) * 1000.0
 
             # Convert to lat/lon/alt
             radius, lon_rad, lat_rad = spice.reclat(position)
@@ -153,6 +166,10 @@ def auto_detect_camera(path: Path) -> Tuple[str, str]:
     # Mars 2020 RDCAM
     if sample_file.startswith('EDF_'):
         return ("rdcam", "m2020")
+
+    # Mars 2020 DDCAM
+    if sample_file.startswith('ESF_'):
+        return ("ddcam", "m2020")
 
     # MSL MARDI
     if sample_file.startswith('0000MD'):
@@ -223,6 +240,21 @@ def get_pose(img_path: Path, camera: str, mission: str, spice_mgr: Optional[SPIC
 
     # Fallback to SPICE
     if spice_mgr:
+        if camera == "lcam" and mission == "m2020":
+            try:
+                _, header = read_image_header_text(str(img_path))
+                start_time = header.get("START_TIME")
+                stop_time = header.get("STOP_TIME")
+                if start_time and stop_time:
+                    et0 = spice.str2et(start_time)
+                    et1 = spice.str2et(stop_time)
+                    pose = spice_mgr.query_pose_et((et0 + et1) / 2.0, camera)
+                    if pose:
+                        return pose
+            except Exception:
+                pass
+            # If header timing can't be parsed, fall through to SCLK-based SPICE.
+
         sclk = extract_sclk(str(img_path), mission)
         if sclk > 0:
             pose = spice_mgr.query_pose(sclk, camera)
@@ -250,7 +282,7 @@ def read_image(img_path: Path, camera: str) -> Optional[np.ndarray]:
             # Convert to BGR for overlay
             return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-        elif camera == 'rdcam':
+        elif camera in ('rdcam', 'ddcam'):
             # 3-band BSQ
             img = img.reshape((layout.bands, layout.lines, layout.line_samples))
             img = np.transpose(img, (1, 2, 0))  # BSQ → HWC
@@ -274,7 +306,8 @@ def read_image(img_path: Path, camera: str) -> Optional[np.ndarray]:
 
 
 def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
-                   filename: str, sclk: float, camera: str, paused: bool) -> None:
+                   img_path: Path, filename: str, sclk: float, camera: str, paused: bool,
+                   spice_mgr: Optional[SPICEManager] = None) -> None:
     """Render metadata overlay on image (in-place)."""
     font = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -290,9 +323,10 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
 
     # Semi-transparent background
     h, w = img.shape[:2]
-    overlay_bg = np.zeros((150, 600, 3), dtype=np.uint8)
+    overlay_h = 200 if camera == "lcam" else 150
+    overlay_bg = np.zeros((overlay_h, 600, 3), dtype=np.uint8)
     overlay_bg[:] = (20, 20, 20)
-    roi = img[10:160, 10:610]
+    roi = img[10:10 + overlay_h, 10:610]
     cv2.addWeighted(overlay_bg, 0.75, roi, 0.25, 0, roi)
 
     # Line 1: Frame info
@@ -303,15 +337,49 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
     short_name = filename if len(filename) < 60 else filename[:57] + "..."
     cv2.putText(img, f"File: {short_name}", (20, 65), font, 0.5, (255, 255, 255), 1)
 
-    # Line 3-4: Pose (if available)
-    if pose.lat_deg is not None:
-        text = f"Position: {pose.lat_deg:.4f}°N, {pose.lon_deg:.4f}°E"
-        cv2.putText(img, text, (20, 95), font, 0.5, color, 1)
+    # Pose (if available)
+    y = 95
+    if camera == "lcam" and spice_mgr and spice_mgr.loaded:
+        # For LCAM, compare embedded header pose vs SPICE using:
+        # 1) mid-point of START_TIME/STOP_TIME only (no fallback).
+        spice_pose = None
+        try:
+            _, header = read_image_header_text(str(img_path))
+            start_time = header.get("START_TIME")
+            stop_time = header.get("STOP_TIME")
+            if start_time and stop_time:
+                et0 = spice.str2et(start_time)
+                et1 = spice.str2et(stop_time)
+                spice_pose = spice_mgr.query_pose_et((et0 + et1) / 2.0, camera)
+        except Exception:
+            spice_pose = None
 
-        text = f"Altitude: {pose.altitude_m:.0f}m  |  Source: {pose.source}"
-        cv2.putText(img, text, (20, 125), font, 0.5, color, 1)
+        if pose.lat_deg is not None:
+            cv2.putText(img, f"Header: {pose.lat_deg:.4f}°N, {pose.lon_deg:.4f}°E  alt {pose.altitude_m:.0f} m", (20, y), font, 0.5, (0, 255, 0), 1)
+            y += 25
+        else:
+            cv2.putText(img, "Header: UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
+            y += 25
+
+        if spice_pose and spice_pose.lat_deg is not None:
+            cv2.putText(img, f"SPICE:  {spice_pose.lat_deg:.4f}°N, {spice_pose.lon_deg:.4f}°E  alt {spice_pose.altitude_m:.0f} m", (20, y), font, 0.5, (0, 255, 255), 1)
+            y += 25
+        else:
+            cv2.putText(img, "SPICE:  UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
+            y += 25
+
+        if pose.position_xyz is not None and spice_pose and spice_pose.position_xyz is not None:
+            d_m = float(np.linalg.norm(pose.position_xyz - spice_pose.position_xyz))
+            cv2.putText(img, f"|Δpos|: {d_m:.1f} m", (20, y), font, 0.5, (255, 255, 255), 1)
     else:
-        cv2.putText(img, "Pose: UNAVAILABLE", (20, 95), font, 0.5, color, 1)
+        if pose.lat_deg is not None:
+            text = f"Position: {pose.lat_deg:.4f}°N, {pose.lon_deg:.4f}°E"
+            cv2.putText(img, text, (20, y), font, 0.5, color, 1)
+            y += 30
+            text = f"Altitude: {pose.altitude_m:.0f}m  |  Source: {pose.source}"
+            cv2.putText(img, text, (20, y), font, 0.5, color, 1)
+        else:
+            cv2.putText(img, "Pose: UNAVAILABLE", (20, y), font, 0.5, color, 1)
 
     # Paused indicator
     if paused:
@@ -463,8 +531,18 @@ def main():
 
             # Render overlays
             if show_overlay:
-                render_overlay(display, pose, idx, len(filenames),
-                             fpath.name, sclk, camera, paused)
+                render_overlay(
+                    display,
+                    pose,
+                    idx,
+                    len(filenames),
+                    fpath,
+                    fpath.name,
+                    sclk,
+                    camera,
+                    paused,
+                    spice_mgr,
+                )
 
             if show_minimap:
                 render_minimap(display, trajectory, idx, show_minimap)
