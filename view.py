@@ -29,12 +29,15 @@ Controls:
     -         - Slow down
     M         - Toggle mini-map
     O         - Toggle overlay
+    T         - Toggle timing stats
 """
 
 import argparse
 import glob
 import re
 import sys
+import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -42,9 +45,39 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
+
+class FrameProfiler:
+    """Simple profiler for frame timing stats."""
+
+    def __init__(self, window: int = 30):
+        self.window = window
+        self.timings: dict[str, deque] = {}
+        self._start: float = 0
+
+    def start(self) -> None:
+        self._start = time.perf_counter()
+
+    def mark(self, name: str) -> None:
+        elapsed = (time.perf_counter() - self._start) * 1000
+        if name not in self.timings:
+            self.timings[name] = deque(maxlen=self.window)
+        self.timings[name].append(elapsed)
+        self._start = time.perf_counter()
+
+    def clear(self, *names: str) -> None:
+        for name in names:
+            self.timings.pop(name, None)
+
+    def stats(self) -> dict[str, float]:
+        return {name: sum(times) / len(times) for name, times in self.timings.items() if times}
+
+    def total(self) -> float:
+        return sum(self.stats().values())
+
+
 # Import PDS3 parser
 sys.path.insert(0, str(Path(__file__).parent))
-from pds_img import infer_pds3_layout, read_image_header_text
+from pds_img import infer_pds3_layout_fast, read_image_header_text
 
 # Try to import SPICE
 try:
@@ -265,28 +298,39 @@ def get_pose(img_path: Path, camera: str, mission: str, spice_mgr: Optional[SPIC
     return PoseData(None, None, None, None, "UNAVAILABLE")
 
 
-def read_image(img_path: Path, camera: str) -> Optional[np.ndarray]:
+def read_image(img_path: Path, camera: str, profiler: Optional[FrameProfiler] = None) -> Optional[np.ndarray]:
     """Read and decode image based on camera type."""
     try:
-        layout, _ = infer_pds3_layout(str(img_path))
+        layout = infer_pds3_layout_fast(str(img_path))
+        if profiler:
+            profiler.mark("read.label")
 
         with open(img_path, 'rb') as f:
             f.seek(layout.image_offset_bytes)
             raw = f.read(layout.image_size_bytes)
+        if profiler:
+            profiler.mark("read.io")
 
         img = np.frombuffer(raw, dtype=np.uint8)
+        if profiler:
+            profiler.mark("read.frombuf")
 
         if camera == 'lcam':
             # 1-band grayscale
             img = img.reshape((layout.lines, layout.line_samples))
             # Convert to BGR for overlay
-            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            result = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            if profiler:
+                profiler.mark("read.convert")
+            return result
 
         elif camera in ('rdcam', 'ddcam'):
-            # 3-band BSQ
+            # 3-band BSQ (RGB) → HWC BGR: stack in reverse order to skip cvtColor
             img = img.reshape((layout.bands, layout.lines, layout.line_samples))
-            img = np.transpose(img, (1, 2, 0))  # BSQ → HWC
-            return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            result = np.stack([img[2], img[1], img[0]], axis=-1)
+            if profiler:
+                profiler.mark("read.convert")
+            return result
 
         elif camera == 'mardi':
             # 1-band Bayer mosaic or 3-band
@@ -294,11 +338,13 @@ def read_image(img_path: Path, camera: str) -> Optional[np.ndarray]:
                 img = img.reshape((layout.lines, layout.line_samples))
                 # Demosaic assuming RGGB pattern (MSL MARDI default)
                 img_bgr = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2BGR)
+                if profiler:
+                    profiler.mark("read.convert")
                 return img_bgr
             else:
+                # 3-band BSQ (RGB) → HWC BGR: stack in reverse order to skip cvtColor
                 img = img.reshape((layout.bands, layout.lines, layout.line_samples))
-                img = np.transpose(img, (1, 2, 0))
-                return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                return np.stack([img[2], img[1], img[0]], axis=-1)
 
     except Exception as e:
         print(f"Error reading {img_path}: {e}")
@@ -507,7 +553,7 @@ def main():
         trajectory.append((pose.lat_deg, pose.lon_deg))
 
     # Setup viewer
-    print("Controls: Space=pause, Q=quit, Left/Right=step, +/-=speed, M=minimap, O=overlay")
+    print("Controls: Space=pause, Q=quit, Left/Right=step, +/-=speed, M=minimap, O=overlay, T=timing")
     cv2.namedWindow("EDL Viewer", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("EDL Viewer", 1280, 960)
 
@@ -516,18 +562,23 @@ def main():
     delay = max(1, 1000 // args.fps)
     show_minimap = not args.no_minimap
     show_overlay = True
+    show_timing = False
+    profiler = FrameProfiler(window=30)
 
     # Main loop
     while True:
+        profiler.start()
         fpath = Path(filenames[idx])
-        img = read_image(fpath, camera)
+        img = read_image(fpath, camera, profiler if show_timing else None)
 
         if img is not None:
             display = img.copy()
+            profiler.mark("copy")
 
             # Get pose for current frame
             pose = get_pose(fpath, camera, mission, spice_mgr)
             sclk = extract_sclk(str(fpath), mission)
+            profiler.mark("pose")
 
             # Render overlays
             if show_overlay:
@@ -543,11 +594,26 @@ def main():
                     paused,
                     spice_mgr,
                 )
+                profiler.mark("overlay")
 
             if show_minimap:
                 render_minimap(display, trajectory, idx, show_minimap)
+                profiler.mark("minimap")
+
+            # Timing overlay
+            if show_timing:
+                stats = profiler.stats()
+                h = img.shape[0]
+                y = h - 20
+                for name, ms in reversed(stats.items()):
+                    cv2.putText(display, f"{name}: {ms:.1f}ms", (10, y),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    y -= 20
+                cv2.putText(display, f"total: {profiler.total():.1f}ms ({1000/max(0.1, profiler.total()):.0f}fps)",
+                            (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
             cv2.imshow("EDL Viewer", display)
+            profiler.mark("display")
 
         # Handle keyboard input
         key = cv2.waitKey(delay if not paused else 0) & 0xFF
@@ -574,10 +640,17 @@ def main():
             print(f"Speed: {1000/delay:.1f} fps")
         elif key == ord('m'):
             show_minimap = not show_minimap
+            if not show_minimap:
+                profiler.clear("minimap")
             print(f"Mini-map: {'ON' if show_minimap else 'OFF'}")
         elif key == ord('o'):
             show_overlay = not show_overlay
+            if not show_overlay:
+                profiler.clear("overlay")
             print(f"Overlay: {'ON' if show_overlay else 'OFF'}")
+        elif key == ord('t'):
+            show_timing = not show_timing
+            print(f"Timing: {'ON' if show_timing else 'OFF'}")
         elif not paused:
             idx = (idx + 1) % len(filenames)
 
