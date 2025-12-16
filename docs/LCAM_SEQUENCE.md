@@ -147,15 +147,15 @@ Every LCAM .IMG file contains embedded metadata in the `IMAGE_HEADER` object:
 ### Timing
 | Field | Description |
 |-------|-------------|
-| `START_TIME` | UTC timestamp (shutter open) |
-| `STOP_TIME` | UTC timestamp (shutter close) |
+| `START_TIME` | UTC timestamp (exposure start) |
+| `STOP_TIME` | UTC timestamp (exposure end) |
 | `SPACECRAFT_CLOCK_START_COUNT` | SCLK value |
 | `SPACECRAFT_CLOCK_MID_COUNT` | SCLK at exposure midpoint |
 | `EXPOSURE_DURATION` | ~95 ms in labels (see note) |
 | `LOCAL_MEAN_SOLAR_TIME` | Mars local time (LMST) |
 | `PLANET_DAY_NUMBER` | Sol number (0 for EDL) |
 
-**Note on EXPOSURE_DURATION:** PDS labels report ~95 ms, but Johnson et al. (2022) specifies actual sensor integration time of **150 µs**. The label value likely includes readout/transfer overhead. For motion blur calculations, use 150 µs (yields ~1 cm blur at descent speeds, consistent with TRN requirements for "crisp images").
+**Note on EXPOSURE_DURATION:** PDS labels report ~95 ms, but Johnson et al. (2022) specifies actual sensor integration time of **150 µs**. The ~95 ms corresponds to the LCAM frame latency requirement: "less than 100 ms between the camera image trigger and the last pixel output of the image" (Maki et al. 2020, Section 2.3.2, p. 15). For motion blur calculations, use 150 µs (yields ~1 cm blur at descent speeds).
 
 ### EDR vs FDR Labels
 

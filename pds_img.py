@@ -14,15 +14,17 @@ import pdr
 _INLINE_KV_RE = re.compile(r"(\w+)=([^=]+?)(?=\s+\w+=|$)")
 
 # Fast regex patterns for lightweight label parsing
-# Note: Use [0-9] instead of \d for Python 3.12+ compatibility with raw byte strings
-_RECORD_BYTES_RE = re.compile(rb"RECORD_BYTES\s*=\s*([0-9]+)")
-_IMAGE_PTR_RE = re.compile(rb"\^IMAGE\s*=\s*([0-9]+)")
+# Note: Use [0-9] instead of \d for Python 3.12+ compatibility with raw byte strings.
+#
+# IMPORTANT: Anchor to start-of-line to avoid matching substrings like DETECTOR_LINES.
+_RECORD_BYTES_RE = re.compile(rb"^\s*RECORD_BYTES\s*=\s*([0-9]+)\s*$", re.MULTILINE)
+_IMAGE_PTR_RE = re.compile(rb"^\s*\^IMAGE\s*=\s*([0-9]+)\s*$", re.MULTILINE)
 # For LINES/LINE_SAMPLES/BANDS/SAMPLE_BITS, find ALL numeric values and use the last one
-# (IMAGE object values come after metadata "NULL" values)
-_LINES_RE = re.compile(rb"LINES\s*=\s*([0-9]+)")
-_LINE_SAMPLES_RE = re.compile(rb"LINE_SAMPLES\s*=\s*([0-9]+)")
-_BANDS_RE = re.compile(rb"BANDS\s*=\s*([0-9]+)")
-_SAMPLE_BITS_RE = re.compile(rb"SAMPLE_BITS\s*=\s*([0-9]+)")
+# (IMAGE object values come after metadata "NULL" values).
+_LINES_RE = re.compile(rb"^\s*LINES\s*=\s*([0-9]+)\s*$", re.MULTILINE)
+_LINE_SAMPLES_RE = re.compile(rb"^\s*LINE_SAMPLES\s*=\s*([0-9]+)\s*$", re.MULTILINE)
+_BANDS_RE = re.compile(rb"^\s*BANDS\s*=\s*([0-9]+)\s*$", re.MULTILINE)
+_SAMPLE_BITS_RE = re.compile(rb"^\s*SAMPLE_BITS\s*=\s*([0-9]+)\s*$", re.MULTILINE)
 
 
 @dataclass(frozen=True)

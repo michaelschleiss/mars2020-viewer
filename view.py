@@ -12,6 +12,7 @@ Auto-detects camera type from filename patterns.
 Displays pose overlay with trajectory mini-map using SPICE kernels.
 
 Usage:
+    python3 view.py                      # Default: data/m2020/lcam
     python3 view.py data/m2020/lcam      # Auto-detects LCAM
     python3 view.py data/m2020/rdcam     # Auto-detects RDCAM
     python3 view.py data/m2020/ddcam     # Auto-detects DDCAM
@@ -78,6 +79,7 @@ class FrameProfiler:
 # Import PDS3 parser
 sys.path.insert(0, str(Path(__file__).parent))
 from pds_img import infer_pds3_layout_fast, read_image_header_text
+from pds_metadata import FrameMetadata, load_frame_metadata
 
 # Optional: fast BSQ (RGB) -> BGR converter (Apple Silicon NEON Cython extension).
 try:
@@ -102,6 +104,65 @@ class PoseData:
     lon_deg: Optional[float]
     altitude_m: Optional[float]
     source: str  # "HEADER", "SPICE", or "UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class MinimapCache:
+    """Pre-rendered mini-map background and per-frame pixel coordinates."""
+
+    base: np.ndarray
+    px_by_index: list[Optional[tuple[int, int]]]
+    map_size: int = 300
+
+
+def build_minimap_cache(
+    trajectory: list[tuple[Optional[float], Optional[float]]],
+    *,
+    map_size: int = 300,
+) -> Optional[MinimapCache]:
+    """Precompute mini-map background for a trajectory to keep per-frame work constant."""
+    valid_pts = [(lat, lon) for lat, lon in trajectory if lat is not None and lon is not None]
+    if not valid_pts:
+        return None
+
+    lats = [p[0] for p in valid_pts]
+    lons = [p[1] for p in valid_pts]
+    lat_min, lat_max = min(lats), max(lats)
+    lon_min, lon_max = min(lons), max(lons)
+
+    lat_margin = (lat_max - lat_min) * 0.1
+    lon_margin = (lon_max - lon_min) * 0.1
+    lat_min -= lat_margin
+    lat_max += lat_margin
+    lon_min -= lon_margin
+    lon_max += lon_margin
+
+    def to_px(lat: float, lon: float) -> tuple[int, int]:
+        x = int((lon - lon_min) / (lon_max - lon_min + 1e-9) * (map_size - 20) + 10)
+        y = int((1 - (lat - lat_min) / (lat_max - lat_min + 1e-9)) * (map_size - 20) + 10)
+        return (x, y)
+
+    px_by_index: list[Optional[tuple[int, int]]] = []
+    for lat, lon in trajectory:
+        if lat is None or lon is None:
+            px_by_index.append(None)
+        else:
+            px_by_index.append(to_px(lat, lon))
+
+    minimap = np.zeros((map_size, map_size, 3), dtype=np.uint8)
+    minimap[:] = (40, 40, 40)
+
+    valid_px = [p for p in px_by_index if p is not None]
+    for i in range(len(valid_px) - 1):
+        cv2.line(minimap, valid_px[i], valid_px[i + 1], (0, 255, 0), 2)
+
+    landing_pt = next((p for p in reversed(valid_px) if p is not None), None)
+    if landing_pt is not None:
+        cv2.drawMarker(minimap, landing_pt, (255, 255, 255), cv2.MARKER_CROSS, 15, 2)
+
+    cv2.rectangle(minimap, (0, 0), (map_size - 1, map_size - 1), (200, 200, 200), 2)
+
+    return MinimapCache(base=minimap, px_by_index=px_by_index, map_size=map_size)
 
 
 class SPICEManager:
@@ -134,7 +195,7 @@ class SPICEManager:
         except Exception as e:
             print(f"Warning: Failed to load SPICE kernels: {e}")
 
-    def query_pose(self, sclk: float, camera: str) -> Optional[PoseData]:
+    def query_pose(self, sclk: float, camera: str, *, sclk_partition: Optional[int] = None) -> Optional[PoseData]:
         """Query pose from SPICE kernels using SCLK."""
         if not self.loaded:
             return None
@@ -142,6 +203,40 @@ class SPICEManager:
         try:
             # Convert SCLK to ephemeris time
             sc_id = -168 if self.mission == 'm2020' else -76
+            if self.mission == "m2020":
+                # M2020 SCLK format is "SSSSSSSSSS-FFFFF", where FFFFF are ticks of 1/65536 sec.
+                coarse = int(sclk)
+                frac_sec = float(sclk) - coarse
+                fine = int(round(frac_sec * 65536.0))
+                if fine >= 65536:
+                    coarse += 1
+                    fine -= 65536
+                if fine < 0:
+                    fine = 0
+
+                partition = 1
+                if sclk_partition is not None:
+                    try:
+                        parsed_partition = int(sclk_partition)
+                        if parsed_partition > 0:
+                            partition = parsed_partition
+                    except Exception:
+                        pass
+                sclk_prefix = f"{partition}/"
+                candidates = (
+                    f"{sclk_prefix}{coarse}-{fine:05d}",
+                    f"{sclk_prefix}{coarse}.{fine:05d}",
+                )
+
+                last_err: Optional[Exception] = None
+                for sclk_str in candidates:
+                    try:
+                        et = spice.scs2e(sc_id, sclk_str)
+                        return self.query_pose_et(et, camera)
+                    except Exception as e:
+                        last_err = e
+                raise last_err if last_err is not None else RuntimeError("SPICE SCLK conversion failed")
+
             sclk_str = f"{int(sclk)}.{int((sclk % 1) * 1000):03d}"
             et = spice.scs2e(sc_id, sclk_str)
             return self.query_pose_et(et, camera)
@@ -217,46 +312,9 @@ def auto_detect_camera(path: Path) -> Tuple[str, str]:
     raise ValueError(f"Unknown camera type from filename: {sample_file}")
 
 
-def extract_sclk(filepath: str, mission: str) -> float:
-    """Extract SCLK from label (full precision)."""
-    path = Path(filepath)
-
-    if mission == 'm2020':
-        # Read SCLK from embedded VICAR label (first 32KB)
-        try:
-            with open(path, 'rb') as f:
-                header = f.read(32768)
-            # SPACECRAFT_CLOCK_START_COUNT=666952752.880376
-            m = re.search(rb'SPACECRAFT_CLOCK_START_COUNT=([0-9.]+)', header)
-            if m:
-                return float(m.group(1))
-        except Exception:
-            pass
-
-    elif mission == 'msl':
-        # Read from .LBL file for MARDI
-        lbl_path = Path(filepath).with_suffix('.LBL')
-        if lbl_path.exists():
-            try:
-                with open(lbl_path, 'r') as f:
-                    for line in f:
-                        if 'SPACECRAFT_CLOCK_START_COUNT' in line:
-                            # Extract value: SPACECRAFT_CLOCK_START_COUNT = "397501987.0000"
-                            match = re.search(r'"([0-9.]+)"', line)
-                            if match:
-                                return float(match.group(1))
-            except Exception:
-                pass
-
-    return 0.0
-
-
 def get_pose(
-    img_path: Path,
-    camera: str,
-    mission: str,
+    meta: FrameMetadata,
     spice_mgr: Optional[SPICEManager],
-    sclk: Optional[float] = None,
 ) -> PoseData:
     """
     Get pose data for a frame.
@@ -264,9 +322,9 @@ def get_pose(
     Priority: embedded header → SPICE → unavailable
     """
     # Try embedded header first (LCAM has it)
-    if camera == 'lcam':
+    if meta.camera == 'lcam':
         try:
-            _, header = read_image_header_text(str(img_path))
+            _, header = read_image_header_text(str(meta.filepath))
             pos_str = header.get('ORIGIN_OFFSET_VECTOR', '')
             if pos_str:
                 # Parse "(x, y, z)" format
@@ -291,25 +349,20 @@ def get_pose(
 
     # Fallback to SPICE
     if spice_mgr:
-        if camera == "lcam" and mission == "m2020":
+        if meta.camera == "lcam" and meta.mission == "m2020":
             try:
-                _, header = read_image_header_text(str(img_path))
-                start_time = header.get("START_TIME")
-                stop_time = header.get("STOP_TIME")
-                if start_time and stop_time:
-                    et0 = spice.str2et(start_time)
-                    et1 = spice.str2et(stop_time)
-                    pose = spice_mgr.query_pose_et((et0 + et1) / 2.0, camera)
+                if meta.start_time and meta.stop_time:
+                    et0 = spice.str2et(meta.start_time)
+                    et1 = spice.str2et(meta.stop_time)
+                    pose = spice_mgr.query_pose_et((et0 + et1) / 2.0, meta.camera)
                     if pose:
                         return pose
             except Exception:
                 pass
-            # If header timing can't be parsed, fall through to SCLK-based SPICE.
 
-        if sclk is None:
-            sclk = extract_sclk(str(img_path), mission)
-        if sclk and sclk > 0:
-            pose = spice_mgr.query_pose(float(sclk), camera)
+        sclk = meta.sclk_mid if meta.sclk_mid is not None else meta.sclk_start
+        if sclk is not None and sclk > 0:
+            pose = spice_mgr.query_pose(float(sclk), meta.camera, sclk_partition=meta.sclk_partition)
             if pose:
                 return pose
 
@@ -376,7 +429,7 @@ def read_image(img_path: Path, camera: str, profiler: Optional[FrameProfiler] = 
 
 
 def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
-                   img_path: Path, filename: str, sclk: float, camera: str, paused: bool,
+                   meta: FrameMetadata, sclk: float, paused: bool,
                    spice_mgr: Optional[SPICEManager] = None) -> None:
     """Render metadata overlay on image (in-place)."""
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -393,34 +446,34 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
 
     # Semi-transparent background
     h, w = img.shape[:2]
-    overlay_h = 200 if camera == "lcam" else 150
+    overlay_h = 200 if meta.camera == "lcam" else 150
     overlay_bg = np.zeros((overlay_h, 600, 3), dtype=np.uint8)
     overlay_bg[:] = (20, 20, 20)
     roi = img[10:10 + overlay_h, 10:610]
     cv2.addWeighted(overlay_bg, 0.75, roi, 0.25, 0, roi)
 
     # Line 1: Frame info
-    text = f"Frame {idx+1}/{total} | SCLK: {sclk:.3f} | Camera: {camera.upper()}"
+    extra = ""
+    if meta.frame_index is not None:
+        extra = f" | N{meta.frame_index}"
+    text = f"Frame {idx+1}/{total} | SCLK: {sclk:.3f} | Camera: {meta.camera.upper()}{extra}"
     cv2.putText(img, text, (20, 35), font, 0.6, color, 2)
 
     # Line 2: Filename
-    short_name = filename if len(filename) < 60 else filename[:57] + "..."
+    short_name = meta.filename if len(meta.filename) < 60 else meta.filename[:57] + "..."
     cv2.putText(img, f"File: {short_name}", (20, 65), font, 0.5, (255, 255, 255), 1)
 
     # Pose (if available)
     y = 95
-    if camera == "lcam" and spice_mgr and spice_mgr.loaded:
+    if meta.camera == "lcam" and spice_mgr and spice_mgr.loaded:
         # For LCAM, compare embedded header pose vs SPICE using:
         # 1) mid-point of START_TIME/STOP_TIME only (no fallback).
         spice_pose = None
         try:
-            _, header = read_image_header_text(str(img_path))
-            start_time = header.get("START_TIME")
-            stop_time = header.get("STOP_TIME")
-            if start_time and stop_time:
-                et0 = spice.str2et(start_time)
-                et1 = spice.str2et(stop_time)
-                spice_pose = spice_mgr.query_pose_et((et0 + et1) / 2.0, camera)
+            if meta.start_time and meta.stop_time:
+                et0 = spice.str2et(meta.start_time)
+                et1 = spice.str2et(meta.stop_time)
+                spice_pose = spice_mgr.query_pose_et((et0 + et1) / 2.0, meta.camera)
         except Exception:
             spice_pose = None
 
@@ -456,65 +509,27 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
         cv2.putText(img, "PAUSED", (w - 150, 40), font, 1.0, (0, 165, 255), 3)
 
 
-def render_minimap(img: np.ndarray, trajectory: list, current_idx: int, show: bool) -> None:
+def render_minimap(img: np.ndarray, cache: Optional[MinimapCache], current_idx: int, show: bool) -> None:
     """Render trajectory mini-map (in-place)."""
-    if not show or not trajectory:
+    if not show or cache is None:
         return
 
     # Mini-map setup
-    map_size = 300
+    map_size = cache.map_size
     h, w = img.shape[:2]
     map_x = 10
     map_y = h - map_size - 10
 
-    # Create mini-map
-    minimap = np.zeros((map_size, map_size, 3), dtype=np.uint8)
-    minimap[:] = (40, 40, 40)
-
-    # Extract valid positions
-    valid_pts = [(lat, lon) for lat, lon in trajectory if lat is not None]
-    if not valid_pts:
+    if map_y < 0 or map_x + map_size > w or map_y + map_size > h:
         return
 
-    # Compute bounds
-    lats = [p[0] for p in valid_pts]
-    lons = [p[1] for p in valid_pts]
-    lat_min, lat_max = min(lats), max(lats)
-    lon_min, lon_max = min(lons), max(lons)
-
-    # Add margin
-    lat_margin = (lat_max - lat_min) * 0.1
-    lon_margin = (lon_max - lon_min) * 0.1
-    lat_min -= lat_margin
-    lat_max += lat_margin
-    lon_min -= lon_margin
-    lon_max += lon_margin
-
-    def to_px(lat, lon):
-        x = int((lon - lon_min) / (lon_max - lon_min + 1e-9) * (map_size - 20) + 10)
-        y = int((1 - (lat - lat_min) / (lat_max - lat_min + 1e-9)) * (map_size - 20) + 10)
-        return (x, y)
-
-    # Draw trajectory
-    for i in range(len(valid_pts) - 1):
-        pt1 = to_px(valid_pts[i][0], valid_pts[i][1])
-        pt2 = to_px(valid_pts[i + 1][0], valid_pts[i + 1][1])
-        cv2.line(minimap, pt1, pt2, (0, 255, 0), 2)
-
     # Draw current position
-    if current_idx < len(trajectory):
-        lat, lon = trajectory[current_idx]
-        if lat is not None:
-            curr_pt = to_px(lat, lon)
+    minimap = cache.base.copy()
+    if 0 <= current_idx < len(cache.px_by_index):
+        curr_pt = cache.px_by_index[current_idx]
+        if curr_pt is not None:
             cv2.circle(minimap, curr_pt, 8, (0, 0, 255), -1)
             cv2.circle(minimap, curr_pt, 4, (255, 255, 255), -1)
-
-    # Draw landing site
-    landing_pt = to_px(valid_pts[-1][0], valid_pts[-1][1])
-    cv2.drawMarker(minimap, landing_pt, (255, 255, 255), cv2.MARKER_CROSS, 15, 2)
-
-    # Border
-    cv2.rectangle(minimap, (0, 0), (map_size - 1, map_size - 1), (200, 200, 200), 2)
 
     # Composite onto image
     roi = img[map_y:map_y+map_size, map_x:map_x+map_size]
@@ -527,7 +542,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
-    parser.add_argument("path", type=Path, help="Path to dataset directory")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=Path("data/m2020/lcam"),
+        help="Path to dataset directory (default: data/m2020/lcam)",
+    )
     parser.add_argument("--fps", type=int, default=15, help="Playback FPS (default: 15)")
     parser.add_argument("--start", type=int, default=0, help="Start frame index")
     parser.add_argument("--no-spice", action="store_true", help="Disable SPICE pose queries")
@@ -546,33 +567,35 @@ def main():
         print(f"Error: {e}")
         return 1
 
-    # Find image files (and cache SCLK ordering if available)
-    sclks: list[Optional[float]]
+    # Find image files
+    metas: list[FrameMetadata]
     if camera == 'mardi':
         lbl_pattern_upper = str(args.path / "0000MD*.LBL")
         lbl_pattern_lower = str(args.path / "0000MD*.lbl")
         lbl_files = sorted(glob.glob(lbl_pattern_upper) + glob.glob(lbl_pattern_lower))
-        filenames = []
+        img_paths: list[Path] = []
         for lbl in lbl_files:
             img_path = Path(lbl).with_suffix(".IMG")
             if not img_path.exists():
                 img_path = Path(lbl).with_suffix(".img")
-            filenames.append(img_path)
-        sclks = [None] * len(filenames)
+            img_paths.append(img_path)
     else:
         img_pattern_upper = str(args.path / "*.IMG")
         img_pattern_lower = str(args.path / "*.img")
-        img_files = glob.glob(img_pattern_upper) + glob.glob(img_pattern_lower)
-        entries = [(extract_sclk(f, mission), Path(f)) for f in img_files]
-        entries.sort(key=lambda x: x[0])
-        sclks = [s for s, _ in entries]
-        filenames = [p for _, p in entries]
+        img_paths = [Path(p) for p in (glob.glob(img_pattern_upper) + glob.glob(img_pattern_lower))]
 
-    if not filenames:
+    if not img_paths:
         print(f"No images found in {args.path}")
         return 1
 
-    print(f"Found {len(filenames)} frames")
+    print(f"Found {len(img_paths)} frames")
+
+    # Load metadata and sort deterministically.
+    metas = [load_frame_metadata(p, mission=mission, camera=camera) for p in img_paths]
+    if camera == "lcam" and mission == "m2020":
+        metas.sort(key=lambda m: (0, m.frame_index) if m.frame_index is not None else (1, m.filename))
+    else:
+        metas.sort(key=lambda m: (m.sclk_start if m.sclk_start is not None else 0.0, m.filename))
 
     # Load SPICE kernels
     spice_mgr = None
@@ -583,17 +606,18 @@ def main():
     print("Loading trajectory...")
     poses = []
     trajectory = []
-    for i, fpath in enumerate(filenames):
-        pose = get_pose(fpath, camera, mission, spice_mgr, sclk=sclks[i])
+    for meta in metas:
+        pose = get_pose(meta, spice_mgr)
         poses.append(pose)
         trajectory.append((pose.lat_deg, pose.lon_deg))
+    minimap_cache = build_minimap_cache(trajectory)
 
     # Setup viewer
     print("Controls: Space=pause, Q=quit, Left/Right=step, +/-=speed, M=minimap, O=overlay, T=timing")
     cv2.namedWindow("EDL Viewer", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("EDL Viewer", 1280, 960)
 
-    idx = min(args.start, len(filenames) - 1)
+    idx = min(args.start, len(metas) - 1)
     paused = False
     delay = max(1, 1000 // args.fps)
     show_minimap = not args.no_minimap
@@ -605,18 +629,15 @@ def main():
     while True:
         if show_timing:
             profiler.start()
-        fpath = filenames[idx]
-        img = read_image(fpath, camera, profiler if show_timing else None)
+        meta = metas[idx]
+        img = read_image(meta.filepath, camera, profiler if show_timing else None)
 
         if img is not None:
             display = img
 
             # Get pose for current frame
             pose = poses[idx]
-            sclk = sclks[idx]
-            if sclk is None:
-                sclk = extract_sclk(str(fpath), mission)
-                sclks[idx] = sclk
+            sclk = meta.sclk_start if meta.sclk_start is not None else 0.0
             if show_timing:
                 profiler.mark("pose")
 
@@ -626,11 +647,9 @@ def main():
                     display,
                     pose,
                     idx,
-                    len(filenames),
-                    fpath,
-                    fpath.name,
+                    len(metas),
+                    meta,
                     sclk,
-                    camera,
                     paused,
                     spice_mgr,
                 )
@@ -638,7 +657,7 @@ def main():
                     profiler.mark("overlay")
 
             if show_minimap:
-                render_minimap(display, trajectory, idx, show_minimap)
+                render_minimap(display, minimap_cache, idx, show_minimap)
                 if show_timing:
                     profiler.mark("minimap")
 
@@ -669,12 +688,12 @@ def main():
             idx = max(0, idx - 1)
             paused = True
         elif key == 83 or key == 3:  # Right arrow
-            idx = min(len(filenames) - 1, idx + 1)
+            idx = min(len(metas) - 1, idx + 1)
             paused = True
         elif key == 80 or key == 0:  # Home
             idx = 0
         elif key == 87 or key == 1:  # End
-            idx = len(filenames) - 1
+            idx = len(metas) - 1
         elif key in (ord('+'), ord('=')):
             delay = max(1, delay - 10)
             print(f"Speed: {1000/delay:.1f} fps")
@@ -697,7 +716,7 @@ def main():
                 profiler.timings.clear()
             print(f"Timing: {'ON' if show_timing else 'OFF'}")
         elif not paused:
-            idx = (idx + 1) % len(filenames)
+            idx = (idx + 1) % len(metas)
 
     cv2.destroyAllWindows()
     return 0

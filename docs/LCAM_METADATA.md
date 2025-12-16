@@ -114,9 +114,41 @@ Complete metadata fields from LCAM PDS3 products. Example file: `ELM_0000_066695
 | Field | Value | Description |
 |-------|-------|-------------|
 | EXPOSURE_DURATION | 0.094736099 s | Label exposure time (~95 ms) |
-| EXPOSURE_TYPE | AUTO | Auto-exposure enabled |
+| EXPOSURE_TYPE | AUTO | Label value (see note below) |
 
-**Note on EXPOSURE_DURATION:** The label reports ~95 ms, but Johnson et al. (2022) specifies actual sensor integration time of **150 µs**. The label value likely includes readout/transfer overhead. For motion blur calculations, use 150 µs. The EXPOSURE_TYPE=AUTO indicates VCE could adjust exposure dynamically; observed values: 94.720 ms (4 frames) and 94.736 ms (83 frames).
+**Note on EXPOSURE_DURATION:** The label reports ~95 ms, but Johnson et al. (2022) specifies actual sensor integration time of **150 µs**. The ~95 ms value corresponds to the LCAM frame latency requirement: "less than 100 ms between the camera image trigger and the last pixel output of the image" (Maki et al. 2020, Section 2.3.2, p. 15). For motion blur calculations, use 150 µs. Observed values: 94.720 ms (4 frames at frames 34, 44, 55, 66) and 94.736 ms (83 frames).
+
+**Note on EXPOSURE_TYPE:** Despite the label value "AUTO", LCAM does **not** have automatic exposure control. The exposure was pre-computed before flight:
+
+> "The LCAM does not have automatic exposure control, so great care must be taken to set the exposure correctly. This process combines detailed testing of the LCAM optical transmission combined with analysis of the Mars surface reflectance, atmospheric scattering and solar illumination."
+> — Johnson et al. (2017), Section "Sensitivity Studies: Exposure Time", p. 14
+
+**Timing observation:** Empirically, STOP_SCLK values are always exact 0.1s boundaries (e.g., .1, .2, .3), while START_SCLK has irregular fractional parts. EXPOSURE_DURATION = STOP_SCLK - START_SCLK exactly. This suggests LVS triggers frame capture at 0.1s SCLK boundaries, with START computed as STOP minus exposure duration.
+
+### SPICE SCLK conversion (fractional ticks)
+
+Mars 2020 SCLK is a two-field clock: **seconds** + **fractional ticks**. The fractional field is in **ticks of 1/65536 second**.
+
+Evidence (from the shipped NAIF SCLK kernel):
+
+- `spice_kernels/M2020_168_SCLKSCET.00007.tsc` (“SCLK Format” comment): the clock is `SSSSSSSSSS-FFFFF` and `FFFFF` is “count of fractions of a second with one fraction being 1/65536 of a second”.
+- `spice_kernels/M2020_168_SCLKSCET.00007.tsc` (“Kernel DATA”): `SCLK01_MODULI_168 = ( 4294967296 65536 )`, i.e. the fractional modulus is `65536`.
+
+Practical implication:
+
+- LCAM labels provide `SPACECRAFT_CLOCK_*_COUNT` as a **decimal seconds** value (e.g. `666952834.305263901`), where the fractional part is seconds.
+- Passing that string directly to `spice.scs2e` (e.g. `"666952834.305263901"`) makes SPICE interpret `305263901` as **ticks**, producing a wildly wrong ET.
+- Convert the decimal fraction to ticks before calling SPICE:
+
+  ```python
+  sclk = 666952834.305263901  # from label
+  coarse = int(sclk)
+  fine = int(round((sclk - coarse) * 65536.0))  # ticks
+  sclk_str = f"1/{coarse}.{fine:05d}"  # partition 1 (LCAM labels set SPACECRAFT_CLOCK_CNT_PARTITION=1)
+  et = spice.scs2e(-168, sclk_str)
+  ```
+
+This is required for any code path that turns LCAM `SPACECRAFT_CLOCK_*` values into ET using SPICE.
 
 ## Compression
 
@@ -326,4 +358,3 @@ Our products are **FDR** (filename contains `FDR`). The CAHVORE values are groun
 - DETECTOR configuration
 - COMPRESSION settings
 - SEQUENCE_ID, MODEL_TYPE, CALIBRATION_SOURCE_ID
-

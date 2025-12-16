@@ -69,3 +69,26 @@ and trajectory height mode as:
 - `camera_elevation_mola = camera_radius - areoid_radius`
 
 If you still see a small residual, use `--surface-bias-m` only if you have a known registration offset; don’t treat it as a generic “make it line up” knob.
+
+## LCAM Pose vs SPICE `M2020` (Why the “Offset” Isn’t Constant)
+
+It’s tempting to compare the LCAM header position (`ORIGIN_OFFSET_VECTOR`) directly to a SPICE query like:
+`spkezr('M2020', et, 'IAU_MARS', 'NONE', 'MARS')` and expect them to match (or differ by a fixed camera lever-arm).
+In practice, several things make this comparison non-trivial:
+
+- `ORIGIN_OFFSET_VECTOR` is the **LCAM camera center** in `REFERENCE_COORD_SYSTEM_NAME` (typically `MCMF_FRAME`), updated in FDRs from reconstructed EDL solutions (SIS: `out/mars2020_mission_docs/Mars2020_Camera_SIS.txt`, Section 6.3.2).
+- SPICE `M2020` in the EDL SPK is the rover navigation frame origin computed from reconstructed EDL data and a time-dependent modeling offset.
+  The EDL SPK (`spice_kernels/m2020_edl_v01.bsp`) explicitly describes:
+  - A segment providing `M2020_DIMU_A` (descent IMU) trajectory relative to Mars.
+  - A segment giving the **offset between** `M2020_DIMU_A` and `M2020` using “mated” vs “suspended” configurations.
+  - A segment making `M2020` coincident with `M2020_LANDING_SITE` (zero offset) after touchdown to bridge to surface SPKs.
+- Around late EDL, `M2020` becomes **exactly** coincident with `M2020_LANDING_SITE` in SPICE (zero offset segment),
+  so `spkezr('M2020', et, ..., 'M2020_LANDING_SITE')` returns a zero vector after touchdown. If you compare to a pose source that
+  continues to move slightly (or uses a different reference/solution), you will see a step/change in the apparent “offset”.
+
+If you want an apples-to-apples “camera lever-arm” comparison, you need the LCAM-to-rover (and possibly LCAM-to-descent) rigid
+transform that the SIS says comes from **metrology** (measured mechanical alignment). Those LCAM metrology transforms are not
+present in the minimal kernel set currently shipped in `spice_kernels/`, so a constant lever-arm cannot be reproduced from SPICE
+alone here.
+
+For M2020 SCLK parsing details (fractional ticks), see `docs/LCAM_METADATA.md`.
