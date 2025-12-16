@@ -25,7 +25,6 @@ from pds_label import (
 
 LabelSource = Literal["embedded_img", "detached_lbl"]
 
-_M2020_SCLK_FROM_NAME_RE = re.compile(r"_(\d{10})_(\d{3})[A-Z]{3}_", re.IGNORECASE)
 _LCAM_FRAME_RE = re.compile(r"_N(\d{7})LVS_", re.IGNORECASE)
 
 
@@ -137,13 +136,6 @@ def _as_float(v: Optional[ODLValue]) -> Optional[float]:
         return float(str(v.value))
     except Exception:
         return None
-
-
-def _derive_sclk_from_filename(filename: str) -> Optional[float]:
-    m = _M2020_SCLK_FROM_NAME_RE.search(filename)
-    if not m:
-        return None
-    return float(f"{m.group(1)}.{m.group(2)}")
 
 
 def _derive_frame_index(camera: str, filename: str) -> Optional[int]:
