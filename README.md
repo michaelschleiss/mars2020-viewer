@@ -17,9 +17,19 @@ To view images run:
 
 ```python3 view.py```
 
+### Optional: Apple Silicon speedup (Cython + NEON)
+
+For faster playback on Apple Silicon when viewing 3-band BSQ products (RDCAM/DDCAM), build the optional `bsq_cython_neon` extension:
+
+```bash
+pixi install
+.pixi/envs/default/bin/python setup_cython_neon.py build_ext --inplace
+```
+
+`view.py` will use it automatically when available.
+
 ## Requirements
 
 Install requirements using conda/mamba
 
 ```mamba install numpy opencv pdr```
-

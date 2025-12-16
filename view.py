@@ -79,6 +79,12 @@ class FrameProfiler:
 sys.path.insert(0, str(Path(__file__).parent))
 from pds_img import infer_pds3_layout_fast, read_image_header_text
 
+# Optional: fast BSQ (RGB) -> BGR converter (Apple Silicon NEON Cython extension).
+try:
+    from bsq_cython_neon import bsq_to_bgr_neon_ultimate as _bsq_to_bgr_fast
+except (ImportError, OSError):
+    _bsq_to_bgr_fast = None
+
 # Try to import SPICE
 try:
     import spiceypy as spice
@@ -333,7 +339,10 @@ def read_image(img_path: Path, camera: str, profiler: Optional[FrameProfiler] = 
         elif camera in ('rdcam', 'ddcam'):
             # 3-band BSQ (RGB) → HWC BGR: stack in reverse order to skip cvtColor
             img = img.reshape((layout.bands, layout.lines, layout.line_samples))
-            result = np.stack([img[2], img[1], img[0]], axis=-1)
+            if _bsq_to_bgr_fast and layout.bands == 3:
+                result = _bsq_to_bgr_fast(img)
+            else:
+                result = np.stack([img[2], img[1], img[0]], axis=-1)
             if profiler:
                 profiler.mark("read.convert")
             return result
@@ -350,6 +359,8 @@ def read_image(img_path: Path, camera: str, profiler: Optional[FrameProfiler] = 
             else:
                 # 3-band BSQ (RGB) → HWC BGR: stack in reverse order to skip cvtColor
                 img = img.reshape((layout.bands, layout.lines, layout.line_samples))
+                if _bsq_to_bgr_fast and layout.bands == 3:
+                    return _bsq_to_bgr_fast(img)
                 return np.stack([img[2], img[1], img[0]], axis=-1)
 
     except Exception as e:
@@ -480,7 +491,7 @@ def render_minimap(img: np.ndarray, trajectory: list, current_idx: int, show: bo
     # Draw trajectory
     for i in range(len(valid_pts) - 1):
         pt1 = to_px(valid_pts[i][0], valid_pts[i][1])
-        pt2 = to_px(valid_pts[i+1][0], valid_pts[i+1][1])
+        pt2 = to_px(valid_pts[i + 1][0], valid_pts[i + 1][1])
         cv2.line(minimap, pt1, pt2, (0, 255, 0), 2)
 
     # Draw current position
@@ -492,12 +503,11 @@ def render_minimap(img: np.ndarray, trajectory: list, current_idx: int, show: bo
             cv2.circle(minimap, curr_pt, 4, (255, 255, 255), -1)
 
     # Draw landing site
-    if valid_pts:
-        landing_pt = to_px(valid_pts[-1][0], valid_pts[-1][1])
-        cv2.drawMarker(minimap, landing_pt, (255, 255, 255), cv2.MARKER_CROSS, 15, 2)
+    landing_pt = to_px(valid_pts[-1][0], valid_pts[-1][1])
+    cv2.drawMarker(minimap, landing_pt, (255, 255, 255), cv2.MARKER_CROSS, 15, 2)
 
     # Border
-    cv2.rectangle(minimap, (0, 0), (map_size-1, map_size-1), (200, 200, 200), 2)
+    cv2.rectangle(minimap, (0, 0), (map_size - 1, map_size - 1), (200, 200, 200), 2)
 
     # Composite onto image
     roi = img[map_y:map_y+map_size, map_x:map_x+map_size]

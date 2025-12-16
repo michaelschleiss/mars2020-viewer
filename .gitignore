@@ -9,6 +9,19 @@ AGENTS.md
 __pycache__/
 *.pyc
 
+# Pixi
+.pixi/
+
+# Cython / native extension artifacts
+build/
+*.egg-info/
+*.cpython-*.so
+*.pyd
+*.dll
+*.dylib
+bsq_cython*.c
+bsq_cython*.html
+
 # Data (downloaded from PDS/USGS)
 data/
 spice_kernels/
