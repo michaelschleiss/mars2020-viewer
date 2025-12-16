@@ -160,21 +160,26 @@ def read_embedded_label_text(img_path: str | Path, *, max_bytes: int = 2_000_000
     img_path = Path(img_path)
     chunk = 65536
     data = bytearray()
+    end_marker = b"END"
+
     with open(img_path, "rb") as f:
         while len(data) < max_bytes:
             part = f.read(chunk)
             if not part:
                 break
             data.extend(part)
-            text = data.decode("ascii", errors="ignore")
-            if _END_RE.search(text):
-                # Keep only through END line to avoid decoding binary payload.
-                lines = text.splitlines()
-                out: list[str] = []
-                for line in lines:
-                    out.append(line)
-                    if _END_RE.match(line):
-                        return "\n".join(out) + "\n"
+
+            # Only decode if END marker might be present (optimization)
+            if end_marker in data:
+                text = data.decode("ascii", errors="ignore")
+                if _END_RE.search(text):
+                    # Keep only through END line to avoid decoding binary payload.
+                    lines = text.splitlines()
+                    out: list[str] = []
+                    for line in lines:
+                        out.append(line)
+                        if _END_RE.match(line):
+                            return "\n".join(out) + "\n"
     raise ValueError(f"Failed to locate END in embedded label: {img_path}")
 
 
@@ -262,6 +267,16 @@ def _parse_value(raw: str) -> ODLValue:
     return ODLValue(raw=raw, value=_parse_scalar(s), unit=unit)
 
 
+def _count_unbalanced_delimiters(s: str) -> tuple[int, int]:
+    """Count unbalanced parentheses and braces in a string.
+
+    Returns (paren_count, brace_count) where positive means more opening than closing.
+    """
+    paren = s.count("(") - s.count(")")
+    brace = s.count("{") - s.count("}")
+    return paren, brace
+
+
 def parse_odl(label_text: str) -> ODLNode:
     """
     Parse a PDS3 ODL label into a tree preserving GROUP/OBJECT structure and repeats.
@@ -300,19 +315,17 @@ def parse_odl(label_text: str) -> ODLNode:
         key, value = m.group(1).strip().upper(), m.group(2).strip()
 
         # Handle multiline values (tuple/list spanning lines).
-        def balance(s: str) -> tuple[int, int]:
-            paren = s.count("(") - s.count(")")
-            brace = s.count("{") - s.count("}")
-            return paren, brace
-
-        paren, brace = balance(value)
-        while (paren > 0 or brace > 0) and i < len(lines):
-            nxt = lines[i].rstrip("\r\n")
-            i += 1
-            value = value + " " + nxt.strip()
-            p2, b2 = balance(nxt)
-            paren += p2
-            brace += b2
+        paren, brace = _count_unbalanced_delimiters(value)
+        if paren > 0 or brace > 0:
+            value_parts = [value]
+            while (paren > 0 or brace > 0) and i < len(lines):
+                nxt = lines[i].rstrip("\r\n")
+                i += 1
+                value_parts.append(nxt.strip())
+                p2, b2 = _count_unbalanced_delimiters(nxt)
+                paren += p2
+                brace += b2
+            value = " ".join(value_parts)
 
         stack[-1].keywords.setdefault(key, []).append(_parse_value(value))
 
@@ -504,6 +517,27 @@ def _find_label_path(img_path: Path) -> Optional[Path]:
     return None
 
 
+def _extract_int_from_header(header: bytes, pattern: re.Pattern, default: int = 0, *, use_last: bool = False) -> int:
+    """Extract integer from PDS3 label header using regex pattern.
+
+    Args:
+        header: Raw bytes from label header
+        pattern: Compiled regex pattern with one capture group
+        default: Default value if pattern not found
+        use_last: If True, use last match (for IMAGE object values after metadata)
+
+    Returns:
+        Extracted integer value or default
+    """
+    if use_last:
+        # For IMAGE object values, take the last match (after metadata "NULL" values)
+        matches = pattern.findall(header)
+        return int(matches[-1]) if matches else default
+    else:
+        m = pattern.search(header)
+        return int(m.group(1)) if m else default
+
+
 # ============================================================================
 # Fast Layout Extraction (Regex-based, ~100x faster)
 # ============================================================================
@@ -528,26 +562,17 @@ def infer_pds3_layout_fast(path: str | Path) -> Pds3ImageLayout:
             # Read first 32KB - sufficient for most embedded PDS3 labels
             header = f.read(32768)
 
-    def extract_first(pattern: re.Pattern, default: int = 0) -> int:
-        m = pattern.search(header)
-        return int(m.group(1)) if m else default
-
-    def extract_last(pattern: re.Pattern, default: int = 0) -> int:
-        # For IMAGE object values, take the last match (after metadata "NULL" values)
-        matches = pattern.findall(header)
-        return int(matches[-1]) if matches else default
-
-    record_bytes = extract_first(_RECORD_BYTES_RE)
-    image_record = extract_first(_IMAGE_PTR_RE, 1)  # Default to 1 for detached
+    record_bytes = _extract_int_from_header(header, _RECORD_BYTES_RE)
+    image_record = _extract_int_from_header(header, _IMAGE_PTR_RE, 1)  # Default to 1 for detached
 
     return Pds3ImageLayout(
         record_bytes=record_bytes,
         label_records=0,  # Not needed for reading
         image_record=image_record,
-        lines=extract_last(_LINES_RE),
-        line_samples=extract_last(_LINE_SAMPLES_RE),
-        bands=extract_last(_BANDS_RE, 1),
-        sample_bits=extract_last(_SAMPLE_BITS_RE),
+        lines=_extract_int_from_header(header, _LINES_RE, use_last=True),
+        line_samples=_extract_int_from_header(header, _LINE_SAMPLES_RE, use_last=True),
+        bands=_extract_int_from_header(header, _BANDS_RE, 1, use_last=True),
+        sample_bits=_extract_int_from_header(header, _SAMPLE_BITS_RE, use_last=True),
         sample_type="",  # Not needed for reading
     )
 
@@ -556,11 +581,8 @@ def infer_pds3_layout_fast(path: str | Path) -> Pds3ImageLayout:
 # Full Layout Extraction (pdr-based)
 # ============================================================================
 
-def infer_pds3_layout(path: str | Path) -> Tuple[Pds3ImageLayout, Dict[str, str]]:
-    """Extract image layout and label from a PDS3 file using pdr."""
-    data = pdr.read(str(path))
-    meta = data.metadata
-
+def _extract_layout_from_pdr_metadata(meta: dict) -> Tuple[Pds3ImageLayout, Dict[str, str]]:
+    """Extract layout and label dict from pdr metadata."""
     def get_int(key: str, default: int = 0) -> int:
         val = meta.get(key)
         if val is None:
@@ -604,13 +626,19 @@ def infer_pds3_layout(path: str | Path) -> Tuple[Pds3ImageLayout, Dict[str, str]
     return layout, label
 
 
+def infer_pds3_layout(path: str | Path) -> Tuple[Pds3ImageLayout, Dict[str, str]]:
+    """Extract image layout and label from a PDS3 file using pdr."""
+    data = pdr.read(str(path))
+    return _extract_layout_from_pdr_metadata(data.metadata)
+
+
 def read_image_bytes(path: str | Path) -> Tuple[bytes, Pds3ImageLayout, Dict[str, str]]:
     """Read raw image bytes from a PDS3 file.
 
     Returns (image_bytes, layout, label).
     """
     data = pdr.read(str(path))
-    layout, label = infer_pds3_layout(path)
+    layout, label = _extract_layout_from_pdr_metadata(data.metadata)
 
     # Preserve the native dtype to avoid truncating >8-bit products.
     image_array = np.asarray(data["IMAGE"])
@@ -673,6 +701,14 @@ def load_frame_metadata(img_path: str | Path, *, mission: str, camera: str) -> F
 
     Extracts timing, identity, acquisition parameters, and layout information
     from either embedded or detached PDS3 labels.
+
+    Args:
+        img_path: Path to .IMG file (automatically checks for detached .LBL)
+        mission: Mission identifier (e.g., "m2020", "msl")
+        camera: Camera identifier (e.g., "lcam", "rdcam", "mardi")
+
+    Returns:
+        FrameMetadata with parsed label tree, typed fields, and derived values.
     """
     img_path = Path(img_path)
     filename = img_path.name
