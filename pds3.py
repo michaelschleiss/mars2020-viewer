@@ -417,9 +417,21 @@ def _as_float(v: Optional[ODLValue]) -> Optional[float]:
         return None
 
 
-def _get_optional_unique(tree: ODLNode, key: str) -> Optional[ODLValue]:
-    """Get a unique or consistently-valued key from anywhere in the tree."""
-    vals = find_key_occurrences(tree, key)
+def _get_optional_unique(tree: ODLNode, key: str, *, within: Optional[tuple[str, str]] = None) -> Optional[ODLValue]:
+    """Get a unique or consistently-valued key from anywhere in tree or within a specific block."""
+    if within:
+        kind, name = within
+        blocks = find_blocks(tree, kind=kind, name=name)
+        if not blocks:
+            return None
+        if len(blocks) != 1:
+            raise ValueError(f"Expected 1 {kind}={name} block, found {len(blocks)}")
+        vals = blocks[0].keywords.get(key.upper(), [])
+        context = f"within {kind}={name}"
+    else:
+        vals = find_key_occurrences(tree, key)
+        context = "when present"
+
     if not vals:
         return None
     if len(vals) == 1:
@@ -427,26 +439,7 @@ def _get_optional_unique(tree: ODLNode, key: str) -> Optional[ODLValue]:
     first = vals[0]
     if all(v.value == first.value and v.unit == first.unit for v in vals[1:]):
         return first
-    raise ValueError(f"Expected unique/consistent {key} when present, found {len(vals)} differing values")
-
-
-def _get_optional_unique_in(tree: ODLNode, key: str, within: tuple[str, str]) -> Optional[ODLValue]:
-    """Get a unique or consistently-valued key from within a specific block."""
-    kind, name = within
-    blocks = find_blocks(tree, kind=kind, name=name)
-    if not blocks:
-        return None
-    if len(blocks) != 1:
-        raise ValueError(f"Expected 1 {kind}={name} block, found {len(blocks)}")
-    vals = blocks[0].keywords.get(key.upper(), [])
-    if not vals:
-        return None
-    if len(vals) == 1:
-        return vals[0]
-    first = vals[0]
-    if all(v.value == first.value and v.unit == first.unit for v in vals[1:]):
-        return first
-    raise ValueError(f"Expected unique/consistent {key} within {kind}={name}, found {len(vals)} differing values")
+    raise ValueError(f"Expected unique/consistent {key} {context}, found {len(vals)} differing values")
 
 
 def _sclk_decimal_seconds_to_ticks(sclk_decimal_seconds: str, *, ticks_per_sec: int = 65536) -> Optional[int]:
@@ -474,6 +467,43 @@ def _sclk_decimal_seconds_to_ticks(sclk_decimal_seconds: str, *, ticks_per_sec: 
     return coarse * ticks_per_sec + fine
 
 
+def _get_str(tree: ODLNode, key: str, *, within: Optional[tuple[str, str]] = None) -> Optional[str]:
+    """Get a string value from the tree."""
+    return _as_str(_get_optional_unique(tree, key, within=within))
+
+
+def _get_int_field(tree: ODLNode, key: str, *, within: Optional[tuple[str, str]] = None) -> Optional[int]:
+    """Get an integer value from the tree."""
+    return _as_int(_get_optional_unique(tree, key, within=within))
+
+
+def _get_float(tree: ODLNode, key: str, *, within: Optional[tuple[str, str]] = None) -> Optional[float]:
+    """Get a float value from the tree."""
+    return _as_float(_get_optional_unique(tree, key, within=within))
+
+
+def _get_required_unique(tree: ODLNode, key: str, context: str) -> ODLValue:
+    """Get a required unique value, raising ValueError with context on failure."""
+    try:
+        val = _get_optional_unique(tree, key)
+        if val is None:
+            raise ValueError(f"Missing required {key}")
+        return val
+    except Exception as e:
+        raise ValueError(f"{context}: missing/ambiguous {key} ({e})") from e
+
+
+def _find_label_path(img_path: Path) -> Optional[Path]:
+    """Find detached .LBL file (case-insensitive) or return None for embedded."""
+    lbl_path = img_path.with_suffix(".LBL")
+    if lbl_path.exists():
+        return lbl_path
+    lbl_path_lower = img_path.with_suffix(".lbl")
+    if lbl_path_lower.exists():
+        return lbl_path_lower
+    return None
+
+
 # ============================================================================
 # Fast Layout Extraction (Regex-based, ~100x faster)
 # ============================================================================
@@ -488,14 +518,10 @@ def infer_pds3_layout_fast(path: str | Path) -> Pds3ImageLayout:
     path = Path(path)
 
     # Check for detached label (.LBL or .lbl file)
-    lbl_path = path.with_suffix(".LBL")
-    lbl_path_lower = path.with_suffix(".lbl")
-    if lbl_path.exists():
+    lbl_path = _find_label_path(path)
+    if lbl_path:
         with open(lbl_path, "rb") as f:
             # Read full detached label (MSL MARDI labels are ~22KB)
-            header = f.read()
-    elif lbl_path_lower.exists():
-        with open(lbl_path_lower, "rb") as f:
             header = f.read()
     else:
         with open(path, "rb") as f:
@@ -652,14 +678,10 @@ def load_frame_metadata(img_path: str | Path, *, mission: str, camera: str) -> F
     filename = img_path.name
 
     # Read label (embedded or detached)
-    lbl_path = img_path.with_suffix(".LBL")
-    lbl_path_lower = img_path.with_suffix(".lbl")
-    if lbl_path.exists():
+    lbl_path = _find_label_path(img_path)
+    if lbl_path:
         label_source: LabelSource = "detached_lbl"
         label_text = read_detached_label_text(lbl_path)
-    elif lbl_path_lower.exists():
-        label_source = "detached_lbl"
-        label_text = read_detached_label_text(lbl_path_lower)
     else:
         label_source = "embedded_img"
         label_text = read_embedded_label_text(img_path)
@@ -667,48 +689,42 @@ def load_frame_metadata(img_path: str | Path, *, mission: str, camera: str) -> F
     tree = parse_odl(label_text)
 
     # Canonical timing for sorting/pose: fail fast if ambiguous.
-    sclk_partition = _as_int(_get_optional_unique(tree, "SPACECRAFT_CLOCK_CNT_PARTITION"))
-    try:
-        sclk_start_val = _get_optional_unique(tree, "SPACECRAFT_CLOCK_START_COUNT")
-    except Exception as e:
-        raise ValueError(f"{img_path}: missing/ambiguous SPACECRAFT_CLOCK_START_COUNT ({e})") from e
-    try:
-        sclk_stop_val = _get_optional_unique(tree, "SPACECRAFT_CLOCK_STOP_COUNT")
-    except Exception as e:
-        raise ValueError(f"{img_path}: missing/ambiguous SPACECRAFT_CLOCK_STOP_COUNT ({e})") from e
+    sclk_partition = _get_int_field(tree, "SPACECRAFT_CLOCK_CNT_PARTITION")
+    sclk_start_val = _get_required_unique(tree, "SPACECRAFT_CLOCK_START_COUNT", str(img_path))
+    sclk_stop_val = _get_required_unique(tree, "SPACECRAFT_CLOCK_STOP_COUNT", str(img_path))
 
     sclk_start_raw = _as_raw_str(sclk_start_val)
     sclk_stop_raw = _as_raw_str(sclk_stop_val)
     sclk_start_ticks = _sclk_decimal_seconds_to_ticks(sclk_start_raw) if sclk_start_raw else None
     sclk_stop_ticks = _sclk_decimal_seconds_to_ticks(sclk_stop_raw) if sclk_stop_raw else None
 
-    start_time = _as_str(_get_optional_unique(tree, "START_TIME"))
-    stop_time = _as_str(_get_optional_unique(tree, "STOP_TIME"))
+    start_time = _get_str(tree, "START_TIME")
+    stop_time = _get_str(tree, "STOP_TIME")
 
     # Optional identity/provenance.
-    product_id = _as_str(_get_optional_unique(tree, "PRODUCT_ID"))
-    product_type = _as_str(_get_optional_unique(tree, "PRODUCT_TYPE"))
-    instrument_id = _as_str(_get_optional_unique(tree, "INSTRUMENT_ID"))
-    instrument_name = _as_str(_get_optional_unique(tree, "INSTRUMENT_NAME"))
-    target_name = _as_str(_get_optional_unique(tree, "TARGET_NAME"))
-    producer_id = _as_str(_get_optional_unique(tree, "PRODUCER_ID"))
-    processing_level = _as_str(_get_optional_unique(tree, "PROCESSING_LEVEL_ID"))
+    product_id = _get_str(tree, "PRODUCT_ID")
+    product_type = _get_str(tree, "PRODUCT_TYPE")
+    instrument_id = _get_str(tree, "INSTRUMENT_ID")
+    instrument_name = _get_str(tree, "INSTRUMENT_NAME")
+    target_name = _get_str(tree, "TARGET_NAME")
+    producer_id = _get_str(tree, "PRODUCER_ID")
+    processing_level = _get_str(tree, "PROCESSING_LEVEL_ID")
 
-    exposure_duration = _as_float(_get_optional_unique(tree, "EXPOSURE_DURATION"))
-    exposure_type = _as_str(_get_optional_unique(tree, "EXPOSURE_TYPE"))
-    filter_name = _as_str(_get_optional_unique(tree, "FILTER_NAME"))
-    compression_type = _as_str(_get_optional_unique(tree, "COMPRESSION_TYPE"))
-    encoding_type = _as_str(_get_optional_unique(tree, "ENCODING_TYPE"))
+    exposure_duration = _get_float(tree, "EXPOSURE_DURATION")
+    exposure_type = _get_str(tree, "EXPOSURE_TYPE")
+    filter_name = _get_str(tree, "FILTER_NAME")
+    compression_type = _get_str(tree, "COMPRESSION_TYPE")
+    encoding_type = _get_str(tree, "ENCODING_TYPE")
 
     # Layout essentials.
-    record_bytes = _as_int(_get_optional_unique(tree, "RECORD_BYTES"))
+    record_bytes = _get_int_field(tree, "RECORD_BYTES")
     image_ptr = _get_optional_unique(tree, "^IMAGE")
     image_ptr_val: Optional[Any] = image_ptr.value if image_ptr is not None else None
-    lines = _as_int(_get_optional_unique_in(tree, "LINES", ("OBJECT", "IMAGE")))
-    line_samples = _as_int(_get_optional_unique_in(tree, "LINE_SAMPLES", ("OBJECT", "IMAGE")))
-    bands = _as_int(_get_optional_unique_in(tree, "BANDS", ("OBJECT", "IMAGE")))
-    sample_bits = _as_int(_get_optional_unique_in(tree, "SAMPLE_BITS", ("OBJECT", "IMAGE")))
-    sample_type = _as_str(_get_optional_unique_in(tree, "SAMPLE_TYPE", ("OBJECT", "IMAGE")))
+    lines = _get_int_field(tree, "LINES", within=("OBJECT", "IMAGE"))
+    line_samples = _get_int_field(tree, "LINE_SAMPLES", within=("OBJECT", "IMAGE"))
+    bands = _get_int_field(tree, "BANDS", within=("OBJECT", "IMAGE"))
+    sample_bits = _get_int_field(tree, "SAMPLE_BITS", within=("OBJECT", "IMAGE"))
+    sample_type = _get_str(tree, "SAMPLE_TYPE", within=("OBJECT", "IMAGE"))
 
     frame_index = _derive_frame_index(camera, filename)
 
