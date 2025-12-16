@@ -443,7 +443,7 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
 
     # Semi-transparent background
     h, w = img.shape[:2]
-    overlay_h = 200 if meta.camera == "lcam" else 150
+    overlay_h = 260 if meta.camera == "lcam" else 150
     overlay_bg = np.zeros((overlay_h, 600, 3), dtype=np.uint8)
     overlay_bg[:] = (20, 20, 20)
     roi = img[10:10 + overlay_h, 10:610]
@@ -463,13 +463,21 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
     # Pose (if available)
     y = 95
     if meta.camera == "lcam" and spice_mgr and spice_mgr.loaded:
-        # For LCAM, compare embedded header pose vs SPICE using START_TIME only.
-        spice_pose = None
+        # For LCAM, compare embedded header pose vs SPICE at multiple timing choices.
+        spice_entries: list[tuple[str, Optional[PoseData]]] = []
         try:
-            if meta.start_time:
-                spice_pose = spice_mgr.query_pose_et(spice.str2et(meta.start_time), meta.camera)
+            et_start = spice.str2et(meta.start_time) if meta.start_time else None
+            et_stop = spice.str2et(meta.stop_time) if meta.stop_time else None
         except Exception:
-            spice_pose = None
+            et_start = None
+            et_stop = None
+
+        if et_start is not None:
+            spice_entries.append(("start", spice_mgr.query_pose_et(et_start, meta.camera)))
+        if et_start is not None and et_stop is not None:
+            spice_entries.append(("mid", spice_mgr.query_pose_et((et_start + et_stop) / 2.0, meta.camera)))
+        if et_stop is not None:
+            spice_entries.append(("stop", spice_mgr.query_pose_et(et_stop, meta.camera)))
 
         if pose.lat_deg is not None:
             cv2.putText(img, f"Header: {pose.lat_deg:.4f}°N, {pose.lon_deg:.4f}°E  alt {pose.altitude_m:.0f} m", (20, y), font, 0.5, (0, 255, 0), 1)
@@ -478,16 +486,35 @@ def render_overlay(img: np.ndarray, pose: PoseData, idx: int, total: int,
             cv2.putText(img, "Header: UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
             y += 25
 
-        if spice_pose and spice_pose.lat_deg is not None:
-            cv2.putText(img, f"SPICE:  {spice_pose.lat_deg:.4f}°N, {spice_pose.lon_deg:.4f}°E  alt {spice_pose.altitude_m:.0f} m", (20, y), font, 0.5, (0, 255, 255), 1)
-            y += 25
-        else:
+        if not spice_entries:
             cv2.putText(img, "SPICE:  UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
             y += 25
-
-        if pose.position_xyz is not None and spice_pose and spice_pose.position_xyz is not None:
-            d_m = float(np.linalg.norm(pose.position_xyz - spice_pose.position_xyz))
-            cv2.putText(img, f"|Δpos|: {d_m:.1f} m", (20, y), font, 0.5, (255, 255, 255), 1)
+        else:
+            for label, spice_pose in spice_entries:
+                if spice_pose and spice_pose.lat_deg is not None:
+                    cv2.putText(
+                        img,
+                        f"SPICE({label}): {spice_pose.lat_deg:.4f}°N, {spice_pose.lon_deg:.4f}°E  alt {spice_pose.altitude_m:.0f} m",
+                        (20, y),
+                        font,
+                        0.5,
+                        (0, 255, 255),
+                        1,
+                    )
+                    y += 25
+                    if pose.position_xyz is not None and spice_pose.position_xyz is not None:
+                        d_m = float(np.linalg.norm(pose.position_xyz - spice_pose.position_xyz))
+                        d_alt = None
+                        if pose.altitude_m is not None and spice_pose.altitude_m is not None:
+                            d_alt = float(spice_pose.altitude_m - pose.altitude_m)
+                        if d_alt is None:
+                            cv2.putText(img, f"  |Δpos|: {d_m:.1f} m", (20, y), font, 0.5, (255, 255, 255), 1)
+                        else:
+                            cv2.putText(img, f"  |Δpos|: {d_m:.1f} m  Δalt: {d_alt:+.1f} m", (20, y), font, 0.5, (255, 255, 255), 1)
+                        y += 25
+                else:
+                    cv2.putText(img, f"SPICE({label}): UNAVAILABLE", (20, y), font, 0.5, (0, 0, 255), 1)
+                    y += 25
     else:
         if pose.lat_deg is not None:
             text = f"Position: {pose.lat_deg:.4f}°N, {pose.lon_deg:.4f}°E"
