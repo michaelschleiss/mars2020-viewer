@@ -203,8 +203,8 @@ class SPICEManager:
         try:
             # Convert SCLK to ephemeris time
             sc_id = -168 if self.mission == 'm2020' else -76
-            if self.mission == "m2020":
-                # M2020 SCLK format is "SSSSSSSSSS-FFFFF", where FFFFF are ticks of 1/65536 sec.
+            if self.mission in ("m2020", "msl"):
+                # M2020/MSL SCLK format is "SSSSSSSSSS-FFFFF", where FFFFF are ticks of 1/65536 sec.
                 coarse = int(sclk)
                 frac_sec = float(sclk) - coarse
                 fine = int(round(frac_sec * 65536.0))
@@ -349,18 +349,31 @@ def get_pose(
 
     # Fallback to SPICE
     if spice_mgr:
-        if meta.camera == "lcam" and meta.mission == "m2020":
+        et: Optional[float] = None
+        if meta.start_time and meta.stop_time:
             try:
-                if meta.start_time and meta.stop_time:
-                    et0 = spice.str2et(meta.start_time)
-                    et1 = spice.str2et(meta.stop_time)
-                    pose = spice_mgr.query_pose_et((et0 + et1) / 2.0, meta.camera)
-                    if pose:
-                        return pose
+                et0 = spice.str2et(meta.start_time)
+                et1 = spice.str2et(meta.stop_time)
+                et = (et0 + et1) / 2.0
             except Exception:
-                pass
+                et = None
+        elif meta.start_time:
+            try:
+                et = spice.str2et(meta.start_time)
+            except Exception:
+                et = None
+        elif meta.stop_time:
+            try:
+                et = spice.str2et(meta.stop_time)
+            except Exception:
+                et = None
 
-        sclk = meta.sclk_mid if meta.sclk_mid is not None else meta.sclk_start
+        if et is not None:
+            pose = spice_mgr.query_pose_et(et, meta.camera)
+            if pose:
+                return pose
+
+        sclk = meta.sclk_start
         if sclk is not None and sclk > 0:
             pose = spice_mgr.query_pose(float(sclk), meta.camera, sclk_partition=meta.sclk_partition)
             if pose:
